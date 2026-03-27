@@ -1,0 +1,10 @@
+litellm
+__pycache__/
+.pytest_cache/
+.venv/
+logs/
+.tasks.lock
+*.egg-info/
+tasks/
+config.yaml
+tasks.csv

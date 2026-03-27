@@ -1,0 +1,33 @@
+server:
+  host: 127.0.0.1
+  port: 8080
+  log_level: INFO
+  log_file: logs/nano-llm-api.log
+  timeout_seconds: 600
+
+providers:
+  openai:
+    base_url: https://api.openai.com
+    api_key_env: OPENAI_API_KEY
+
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    headers:
+      anthropic-version: "2023-06-01"
+
+models:
+  gpt-4.1:
+    provider: openai
+    protocol: openai_responses
+    target_model: gpt-4.1
+
+  gpt-4o-chat:
+    provider: openai
+    protocol: openai_chat
+    target_model: gpt-4o-mini
+
+  claude-sonnet:
+    provider: anthropic
+    protocol: anthropic_messages
+    target_model: claude-3-7-sonnet-latest

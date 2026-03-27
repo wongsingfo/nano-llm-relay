@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Board"
+  short_description: "Coordinate tasks via tasks.csv"
+  default_prompt: "Coordinate complex work through tasks.csv, claim unfinished tasks via the Python script, create as few tasks as necessary, keep CSV result summaries short, and write detailed resumable memory directly to tasks/*.result.md instead of through the script."
