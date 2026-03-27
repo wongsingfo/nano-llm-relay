@@ -46,7 +46,6 @@ class ModelRoute:
     provider: str
     protocol: ProtocolName
     target_model: str
-    force_stream: bool = False
     max_tokens: int | None = None
     timeout_seconds: float | None = None
     endpoint: str | None = None
@@ -144,7 +143,6 @@ def load_config(path: str | Path) -> AppConfig:
             provider=provider_name,
             protocol=protocol,
             target_model=target_model,
-            force_stream=_optional_bool(value.get("force_stream")) or False,
             max_tokens=_optional_int(value.get("max_tokens")),
             timeout_seconds=_optional_float(value.get("timeout_seconds")),
             endpoint=_optional_str(value.get("endpoint")),
@@ -178,15 +176,3 @@ def _optional_float(value: Any) -> float | None:
         return None
     return float(value)
 
-
-def _optional_bool(value: Any) -> bool | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        return value
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"Expected a boolean value, got `{value}`.")

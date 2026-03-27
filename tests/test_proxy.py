@@ -17,7 +17,7 @@ from nano_llm_api.service import ProxyService
 pytestmark = pytest.mark.anyio
 
 
-def make_config(tmp_path: Path, *, force_stream_openai_chat: bool = False) -> Path:
+def make_config(tmp_path: Path) -> Path:
     config = {
         "server": {
             "host": "127.0.0.1",
@@ -47,7 +47,6 @@ def make_config(tmp_path: Path, *, force_stream_openai_chat: bool = False) -> Pa
                 "provider": "openai",
                 "protocol": "openai_chat",
                 "target_model": "gpt-4o-mini",
-                **({"force_stream": True} if force_stream_openai_chat else {}),
             },
             "gpt-responses": {
                 "provider": "openai",
@@ -324,56 +323,6 @@ async def test_anthropic_inbound_to_openai_chat_stream(tmp_path: Path):
     assert "Hello" in body
     assert "event: message_stop" in body
 
-
-async def test_anthropic_inbound_to_openai_chat_non_stream_with_forced_upstream_stream(
-    tmp_path: Path,
-):
-    config_path = make_config(tmp_path, force_stream_openai_chat=True)
-    sse_payload = (
-        'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,'
-        '"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
-        'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,'
-        '"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
-        'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,'
-        '"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
-        '"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n'
-        "data: [DONE]\n\n"
-    ).encode("utf-8")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == "https://openai.test/v1/chat/completions"
-        payload = json.loads(request.content.decode("utf-8"))
-        assert payload["stream"] is True
-        assert payload["messages"] == [
-            {"role": "user", "content": "Say hello"},
-        ]
-        return httpx.Response(
-            200,
-            headers={"content-type": "text/event-stream"},
-            content=sse_payload,
-        )
-
-    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://testserver",
-        ) as client:
-            response = await client.post(
-                "/v1/messages",
-                headers={"anthropic-version": "2023-06-01"},
-                json={
-                    "model": "gpt-chat",
-                    "max_tokens": 64,
-                    "messages": [{"role": "user", "content": "Say hello"}],
-                },
-            )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["content"] == [{"type": "text", "text": "Hello"}]
-    assert body["stop_reason"] == "end_turn"
-    assert body["usage"] == {"input_tokens": 5, "output_tokens": 2}
 
 
 async def test_openai_responses_inbound_to_anthropic_tool_call(tmp_path: Path):

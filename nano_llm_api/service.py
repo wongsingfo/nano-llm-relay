@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -137,10 +137,8 @@ class ProxyService:
 
         provider = config.providers[route.provider]
         client = await self._get_provider_client(provider)
-        upstream_stream = normalized.stream or route.force_stream
-        outbound_request = replace(normalized, stream=upstream_stream)
         try:
-            payload = serialize_request(route.protocol, route.target_model, outbound_request)
+            payload = serialize_request(route.protocol, route.target_model, normalized)
         except ProtocolError as exc:
             raise ProxyError(400, str(exc)) from exc
         payload = self._merge_route_extra_body(route.protocol, payload, route.extra_body)
@@ -150,21 +148,20 @@ class ProxyService:
             provider=provider,
             protocol=route.protocol,
             inbound_headers=inbound_headers,
-            stream=upstream_stream,
+            stream=normalized.stream,
         )
         timeout = route.timeout_seconds or provider.timeout_seconds or config.server.timeout_seconds
 
         self.logger.info(
-            "proxy_request inbound=%s outbound=%s model=%s target_model=%s stream=%s upstream_stream=%s",
+            "proxy_request inbound=%s outbound=%s model=%s target_model=%s stream=%s",
             inbound_protocol,
             route.protocol,
             normalized.model,
             route.target_model,
             normalized.stream,
-            upstream_stream,
         )
 
-        if upstream_stream and normalized.stream:
+        if normalized.stream:
             return await self._handle_stream(
                 client=client,
                 inbound_protocol=inbound_protocol,
@@ -173,19 +170,6 @@ class ProxyService:
                 headers=headers,
                 payload=payload,
                 timeout=timeout,
-                started_at=started_at,
-            )
-
-        if upstream_stream:
-            return await self._handle_stream_to_json(
-                client=client,
-                inbound_protocol=inbound_protocol,
-                outbound_protocol=route.protocol,
-                url=url,
-                headers=headers,
-                payload=payload,
-                timeout=timeout,
-                normalized_request=normalized,
                 started_at=started_at,
             )
 
@@ -241,61 +225,6 @@ class ProxyService:
             inbound_protocol,
             outbound_protocol,
             response.status_code,
-            (time.perf_counter() - started_at) * 1000,
-        )
-        return JSONResponse(final_payload)
-
-    async def _handle_stream_to_json(
-        self,
-        client: httpx.AsyncClient,
-        inbound_protocol: ProtocolName,
-        outbound_protocol: ProtocolName,
-        url: str,
-        headers: dict[str, str],
-        payload: dict[str, Any],
-        timeout: float,
-        normalized_request,
-        started_at: float,
-    ) -> JSONResponse:
-        request_context = client.stream(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-        )
-        try:
-            upstream_response = await request_context.__aenter__()
-        except httpx.HTTPError as exc:
-            raise ProxyError(502, f"Upstream streaming request failed: {exc}") from exc
-
-        if upstream_response.status_code >= 400:
-            details = await self._safe_error_body(upstream_response)
-            await request_context.__aexit__(None, None, None)
-            raise ProxyError(
-                upstream_response.status_code,
-                "Upstream provider returned an error.",
-                details,
-            )
-
-        try:
-            normalized_response = await self._collect_stream_response(
-                outbound_protocol=outbound_protocol,
-                upstream_response=upstream_response,
-            )
-            final_payload = serialize_response(inbound_protocol, normalized_request, normalized_response)
-        except ProxyError:
-            raise
-        except ProtocolError as exc:
-            raise ProxyError(502, str(exc)) from exc
-        finally:
-            await request_context.__aexit__(None, None, None)
-
-        self.logger.info(
-            "proxy_response inbound=%s outbound=%s status=%s duration_ms=%.2f",
-            inbound_protocol,
-            outbound_protocol,
-            upstream_response.status_code,
             (time.perf_counter() - started_at) * 1000,
         )
         return JSONResponse(final_payload)
