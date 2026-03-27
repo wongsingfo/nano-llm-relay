@@ -114,6 +114,7 @@ class ProxyService:
         inbound_headers: Mapping[str, str],
     ):
         started_at = time.perf_counter()
+        self._log_inbound_request(inbound_protocol, body)
         try:
             normalized = normalize_request(inbound_protocol, body)
         except ProtocolError as exc:
@@ -142,7 +143,7 @@ class ProxyService:
             payload = serialize_request(route.protocol, route.target_model, outbound_request)
         except ProtocolError as exc:
             raise ProxyError(400, str(exc)) from exc
-        payload.update(route.extra_body)
+        payload = self._merge_route_extra_body(route.protocol, payload, route.extra_body)
 
         url = join_endpoint(provider.base_url, route.endpoint or default_endpoint_path(route.protocol))
         headers = self._build_outbound_headers(
@@ -221,7 +222,7 @@ class ProxyService:
             raise ProxyError(
                 response.status_code,
                 "Upstream provider returned an error.",
-                self._safe_error_body(response),
+                await self._safe_error_body(response),
             )
 
         try:
@@ -269,7 +270,7 @@ class ProxyService:
             raise ProxyError(502, f"Upstream streaming request failed: {exc}") from exc
 
         if upstream_response.status_code >= 400:
-            details = self._safe_error_body(upstream_response)
+            details = await self._safe_error_body(upstream_response)
             await request_context.__aexit__(None, None, None)
             raise ProxyError(
                 upstream_response.status_code,
@@ -323,12 +324,24 @@ class ProxyService:
             raise ProxyError(502, f"Upstream streaming request failed: {exc}") from exc
 
         if upstream_response.status_code >= 400:
-            details = self._safe_error_body(upstream_response)
+            details = await self._safe_error_body(upstream_response)
             await request_context.__aexit__(None, None, None)
             raise ProxyError(
                 upstream_response.status_code,
                 "Upstream provider returned an error.",
                 details,
+            )
+
+        if inbound_protocol == outbound_protocol:
+            return StreamingResponse(
+                self._stream_passthrough_body(
+                    request_context=request_context,
+                    upstream_response=upstream_response,
+                    inbound_protocol=inbound_protocol,
+                    outbound_protocol=outbound_protocol,
+                    started_at=started_at,
+                ),
+                media_type="text/event-stream",
             )
 
         encoder = build_stream_encoder(inbound_protocol)
@@ -352,6 +365,27 @@ class ProxyService:
                 )
 
         return StreamingResponse(stream_body(), media_type="text/event-stream")
+
+    async def _stream_passthrough_body(
+        self,
+        request_context,
+        upstream_response: httpx.Response,
+        inbound_protocol: ProtocolName,
+        outbound_protocol: ProtocolName,
+        started_at: float,
+    ):
+        try:
+            async for chunk in upstream_response.aiter_bytes():
+                if chunk:
+                    yield chunk
+        finally:
+            await request_context.__aexit__(None, None, None)
+            self.logger.info(
+                "proxy_stream_complete inbound=%s outbound=%s duration_ms=%.2f",
+                inbound_protocol,
+                outbound_protocol,
+                (time.perf_counter() - started_at) * 1000,
+            )
 
     def _build_outbound_headers(
         self,
@@ -387,11 +421,74 @@ class ProxyService:
 
         return headers
 
-    def _safe_error_body(self, response: httpx.Response) -> Any:
+    def _log_inbound_request(self, inbound_protocol: ProtocolName, body: dict[str, Any]) -> None:
+        if not self.logger.isEnabledFor(logging.DEBUG):
+            return
         try:
-            return response.json()
+            serialized_body = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            serialized_body = repr(body)
+        self.logger.debug(
+            "proxy_inbound_request inbound=%s body=%s",
+            inbound_protocol,
+            serialized_body,
+        )
+
+    def _merge_route_extra_body(
+        self,
+        protocol: ProtocolName,
+        payload: dict[str, Any],
+        extra_body: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        merged_payload = dict(payload)
+        remaining_extra = dict(extra_body)
+
+        if protocol == OPENAI_RESPONSES:
+            self._merge_responses_reasoning_defaults(merged_payload, remaining_extra)
+
+        merged_payload.update(remaining_extra)
+        return merged_payload
+
+    def _merge_responses_reasoning_defaults(
+        self,
+        payload: dict[str, Any],
+        extra_body: dict[str, Any],
+    ) -> None:
+        reasoning_defaults = extra_body.pop("reasoning", None)
+        legacy_effort = extra_body.pop("model_reasoning_effort", None)
+
+        if reasoning_defaults is None and legacy_effort is None:
+            return
+
+        if reasoning_defaults is not None and not isinstance(reasoning_defaults, Mapping):
+            if "reasoning" not in payload:
+                payload["reasoning"] = reasoning_defaults
+            return
+
+        merged_reasoning = dict(payload.get("reasoning") or {}) if isinstance(payload.get("reasoning"), Mapping) else {}
+        if isinstance(reasoning_defaults, Mapping):
+            for key, value in reasoning_defaults.items():
+                merged_reasoning.setdefault(str(key), value)
+        if legacy_effort is not None:
+            merged_reasoning.setdefault("effort", legacy_effort)
+        if merged_reasoning:
+            payload["reasoning"] = merged_reasoning
+
+    async def _safe_error_body(self, response: httpx.Response) -> Any:
+        try:
+            raw = response.content
+        except httpx.ResponseNotRead:
+            try:
+                raw = await response.aread()
+            except Exception:
+                return ""
+
+        if not raw:
+            return ""
+        try:
+            return json.loads(raw)
         except Exception:
-            return response.text
+            return raw.decode("utf-8", errors="replace")
 
     async def _discover_provider_models(
         self,
@@ -431,7 +528,7 @@ class ProxyService:
             )
 
         if response.status_code >= 400:
-            details = self._safe_error_body(response)
+            details = await self._safe_error_body(response)
             self.logger.warning(
                 "provider_model_discovery_upstream_error provider=%s status=%s",
                 provider_name,

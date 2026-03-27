@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -20,7 +21,7 @@ def create_app(
     resolved_config_path = config_path or os.environ.get("NANO_LLM_CONFIG", "config.yaml")
     config_store = ConfigStore(resolved_config_path)
     config = config_store.get_config()
-    setup_logging(config.server)
+    logger = setup_logging(config.server)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -37,6 +38,14 @@ def create_app(
         if exc.details is not None:
             payload["error"]["details"] = exc.details
         return JSONResponse(payload, status_code=exc.status_code)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("unhandled_exception path=%s", request.url.path, exc_info=exc)
+        return JSONResponse(
+            {"error": {"message": "Internal server error."}},
+            status_code=500,
+        )
 
     @app.get("/")
     async def root():
@@ -90,4 +99,5 @@ def main() -> None:
         host=config.server.host,
         port=config.server.port,
         log_level=config.server.log_level.lower(),
+        log_config=None,
     )

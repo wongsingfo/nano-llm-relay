@@ -23,6 +23,7 @@ from .sse import encode_sse, iter_sse_events
 OPENAI_CHAT = "openai_chat"
 OPENAI_RESPONSES = "openai_responses"
 ANTHROPIC_MESSAGES = "anthropic_messages"
+RESPONSES_PASSTHROUGH_TOOLS_KEY = "_responses_passthrough_tools"
 
 
 class ProtocolError(ValueError):
@@ -301,12 +302,31 @@ def _normalize_openai_responses_request(body: dict[str, Any]) -> NormalizedReque
 
         raise ProtocolError(f"Unsupported responses input item type `{item_type}`.")
 
+    tools, passthrough_tools = _normalize_openai_responses_tools(body.get("tools"))
+    extra = _pick_keys(
+        body,
+        {
+            "background",
+            "conversation",
+            "include",
+            "metadata",
+            "parallel_tool_calls",
+            "reasoning",
+            "store",
+            "text",
+            "truncation",
+            "user",
+        },
+    )
+    if passthrough_tools:
+        extra[RESPONSES_PASSTHROUGH_TOOLS_KEY] = passthrough_tools
+
     return NormalizedRequest(
         inbound_protocol=OPENAI_RESPONSES,
         model=model,
         stream=bool(body.get("stream")),
         messages=messages,
-        tools=_normalize_openai_responses_tools(body.get("tools")),
+        tools=tools,
         tool_choice=body.get("tool_choice"),
         max_tokens=_optional_int(body.get("max_output_tokens")),
         temperature=_optional_float(body.get("temperature")),
@@ -314,21 +334,7 @@ def _normalize_openai_responses_request(body: dict[str, Any]) -> NormalizedReque
         stop_sequences=[],
         metadata=_normalize_mapping(body.get("metadata")),
         previous_response_id=_optional_string(body.get("previous_response_id")),
-        extra=_pick_keys(
-            body,
-            {
-                "background",
-                "conversation",
-                "include",
-                "metadata",
-                "parallel_tool_calls",
-                "reasoning",
-                "store",
-                "text",
-                "truncation",
-                "user",
-            },
-        ),
+        extra=extra,
     )
 
 
@@ -379,6 +385,7 @@ def _normalize_anthropic_request(body: dict[str, Any]) -> NormalizedRequest:
 
 
 def _serialize_openai_chat_request(target_model: str, request: NormalizedRequest) -> dict[str, Any]:
+    _ensure_no_passthrough_responses_tools(request, OPENAI_CHAT)
     payload: dict[str, Any] = {
         "model": target_model,
         "messages": _messages_to_openai_chat(request.messages),
@@ -424,8 +431,13 @@ def _serialize_openai_responses_request(
         payload["top_p"] = request.top_p
     if request.previous_response_id:
         payload["previous_response_id"] = request.previous_response_id
+    response_tools: list[dict[str, Any]] = []
     if request.tools and request.tool_choice != "none":
-        payload["tools"] = [_tool_to_openai_responses(tool) for tool in request.tools]
+        response_tools.extend(_tool_to_openai_responses(tool) for tool in request.tools)
+    if request.tool_choice != "none":
+        response_tools.extend(_responses_passthrough_tools(request))
+    if response_tools:
+        payload["tools"] = response_tools
     if request.tool_choice is not None:
         payload["tool_choice"] = _tool_choice_to_openai_responses(request.tool_choice)
     payload.update(
@@ -449,6 +461,7 @@ def _serialize_openai_responses_request(
 
 
 def _serialize_anthropic_request(target_model: str, request: NormalizedRequest) -> dict[str, Any]:
+    _ensure_no_passthrough_responses_tools(request, ANTHROPIC_MESSAGES)
     payload: dict[str, Any] = {
         "model": target_model,
         "messages": _messages_to_anthropic(request.messages),
@@ -1855,21 +1868,25 @@ def _normalize_openai_chat_tools(body: dict[str, Any]) -> list[ToolDefinition]:
     return tools
 
 
-def _normalize_openai_responses_tools(raw_tools: Any) -> list[ToolDefinition]:
+def _normalize_openai_responses_tools(raw_tools: Any) -> tuple[list[ToolDefinition], list[dict[str, Any]]]:
     tools: list[ToolDefinition] = []
+    passthrough_tools: list[dict[str, Any]] = []
     for raw_tool in raw_tools or []:
-        if not isinstance(raw_tool, dict) or raw_tool.get("type") != "function":
-            raise ProtocolError("Only function tools are supported for responses conversion.")
-        tools.append(
-            ToolDefinition(
-                name=_require_string(raw_tool.get("name"), "Responses tool missing `name`."),
-                description=_optional_string(raw_tool.get("description")),
-                input_schema=_normalize_mapping(
-                    raw_tool.get("parameters") or raw_tool.get("input_schema")
-                ),
+        if not isinstance(raw_tool, dict):
+            raise ProtocolError("Responses tools must be objects.")
+        if raw_tool.get("type") == "function":
+            tools.append(
+                ToolDefinition(
+                    name=_require_string(raw_tool.get("name"), "Responses tool missing `name`."),
+                    description=_optional_string(raw_tool.get("description")),
+                    input_schema=_normalize_mapping(
+                        raw_tool.get("parameters") or raw_tool.get("input_schema")
+                    ),
+                )
             )
-        )
-    return tools
+            continue
+        passthrough_tools.append(dict(raw_tool))
+    return tools, passthrough_tools
 
 
 def _normalize_anthropic_tools(raw_tools: Any) -> list[ToolDefinition]:
@@ -1946,8 +1963,30 @@ def _tool_choice_to_anthropic(choice: Any) -> Any:
     return choice
 
 
+def _responses_passthrough_tools(request: NormalizedRequest) -> list[dict[str, Any]]:
+    raw_tools = request.extra.get(RESPONSES_PASSTHROUGH_TOOLS_KEY) or []
+    return [dict(tool) for tool in raw_tools if isinstance(tool, dict)]
+
+
+def _ensure_no_passthrough_responses_tools(
+    request: NormalizedRequest,
+    target_protocol: ProtocolName,
+) -> None:
+    raw_tools = _responses_passthrough_tools(request)
+    if not raw_tools:
+        return
+    raw_types = sorted({str(tool.get("type") or "unknown") for tool in raw_tools})
+    raise ProtocolError(
+        "Responses tools of type "
+        f"{', '.join(f'`{tool_type}`' for tool_type in raw_types)} "
+        f"require an `{OPENAI_RESPONSES}` target, not `{target_protocol}`."
+    )
+
+
 def _normalize_role(value: Any) -> str:
     role = _require_string(value, "Message is missing `role`.")
+    if role == "developer":
+        return "system"
     if role not in {"system", "user", "assistant", "tool", "function"}:
         raise ProtocolError(f"Unsupported role `{role}`.")
     return role

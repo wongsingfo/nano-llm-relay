@@ -1,12 +1,12 @@
 ## Final goal
 
-创建一个极简的本地代理服务，支持多协议入站（Inbound）与多协议出站（Outbound）的动态转换。确保无论是要求 OpenAI 格式还是 Anthropic 格式的客户端 （即 codex 和 claude code cli），也需要支持流式协议 (SSE)，都能通过该中转层调用任何后端的模型。
+Build an extremely small local proxy service that can dynamically translate between multiple inbound and outbound LLM protocols. Clients that expect either the OpenAI format or the Anthropic format, including SSE streaming behavior, must be able to call any configured backend model through this relay layer. This includes local tools such as Codex and Claude Code CLI.
 
-这是 ./litellm 的功能子集(可以参考代码），为什么要做这件事？现有的工具（如 LiteLLM）虽然功能强大，但为了兼容各种复杂的企业级场景（负载均衡、数据库集成、复杂的权限管理），确实引入了大量的依赖，导致启动速度慢、内存占用高。对于个人本地使用的中转层，核心需求是轻量化和极简配置。
+This project intentionally targets a subset of `./litellm` and may use it as a reference. `litellm/litellm/llms`. Existing tools such as LiteLLM are powerful, but they also carry many dependencies to support enterprise features like load balancing, database integrations, and complex authorization flows. That makes startup slower and memory usage higher. For personal local usage, the priorities are lightweight runtime behavior and minimal configuration.
 
-为了实现“轻量级”和“低内存占用”：
+To stay lightweight and low-memory:
 
-1. 语言：Python + FastAPI 理由：虽然 Go 或 Rust 更省内存，但考虑到 AI 领域的大多数 SDK 和处理逻辑（如 Stream 流处理、Prompt 模板）在 Python 中实现最快。使用 FastAPI 的异步特性可以保证高并发下的低延迟。
-2. 可以根据开发便利性引入官方 SDK（如 `openai` 或 `anthropic` 库）。但若追求极致的内存占用和启动速度，建议优先考虑直接使用 `httpx` 进行原始请求。
-3. 配置管理：YAML (PyYAML) 理由：对人类可读性最好，方便手动编辑模型映射关系。
-4. 不使用数据库：直接输出到日志文件即可
+1. Language: Python + FastAPI. Go or Rust may use less memory, but Python is still the fastest way to build on top of the current AI ecosystem, especially for streaming, SDK integration, and prompt-processing logic. FastAPI's async model is enough to keep latency low under concurrency.
+2. SDK choice: official SDKs such as `openai` or `anthropic` are acceptable when they improve development speed. If startup time and memory footprint matter more, prefer direct `httpx` requests.
+3. Configuration: YAML via PyYAML. It is the easiest format to read and edit by hand for provider and model mappings.
+4. No database: file logging is enough.
