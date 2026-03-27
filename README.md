@@ -46,6 +46,7 @@ providers:
   anthropic:
     base_url: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
+    proxy: http://127.0.0.1:7890
     headers:
       anthropic-version: "2023-06-01"
 
@@ -63,6 +64,7 @@ Important fields:
 - `server.timeout_seconds`: default upstream timeout
 - `providers.<name>.base_url`: upstream API base URL
 - `providers.<name>.api_key` or `api_key_env`: upstream API key source
+- `providers.<name>.proxy`: optional outbound proxy URL for requests to that provider
 - `providers.<name>.auth_header` / `auth_prefix`: custom auth header settings for non-standard OpenAI-compatible backends
 - `providers.<name>.headers`: extra static headers sent to the upstream provider
 - `models.<alias>.protocol`: target upstream protocol
@@ -71,6 +73,8 @@ Important fields:
 - `models.<alias>.extra_body`: extra fixed fields merged into the upstream request body
 
 The config is reloaded automatically when the YAML file changes on disk.
+
+Provider proxy settings apply to both normal JSON requests and SSE streaming requests. When `transport` is injected for tests, the configured proxy is ignored so mock transports continue to work.
 
 `GET /v1/models` returns local alias routes configured in `models`.
 

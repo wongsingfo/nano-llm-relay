@@ -26,6 +26,7 @@ class ProviderConfig:
     base_url: str
     api_key: str | None = None
     api_key_env: str | None = None
+    proxy: str | None = None
     auth_header: str | None = None
     auth_prefix: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
@@ -111,6 +112,7 @@ def load_config(path: str | Path) -> AppConfig:
             base_url=str(base_url),
             api_key=_optional_str(value.get("api_key")),
             api_key_env=_optional_str(value.get("api_key_env")),
+            proxy=_optional_str(value.get("proxy")),
             auth_header=_optional_str(value.get("auth_header")),
             auth_prefix=_optional_str(value.get("auth_prefix")),
             headers={str(key): str(item) for key, item in headers.items()},

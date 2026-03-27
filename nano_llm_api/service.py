@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -38,6 +38,12 @@ class ProxyError(Exception):
         self.details = details
 
 
+@dataclass(slots=True)
+class _ProviderClientState:
+    proxy: str | None
+    client: httpx.AsyncClient
+
+
 class ProxyService:
     def __init__(
         self,
@@ -46,10 +52,20 @@ class ProxyService:
     ):
         self.config_store = config_store
         self.logger = logging.getLogger("nano_llm_api")
-        self.client = httpx.AsyncClient(transport=transport, timeout=None)
+        self.transport = transport
+        self._client_lock = asyncio.Lock()
+        self._provider_clients: dict[str, _ProviderClientState] = {}
+        self._retired_clients: list[httpx.AsyncClient] = []
 
     async def close(self) -> None:
-        await self.client.aclose()
+        async with self._client_lock:
+            active_clients = [state.client for state in self._provider_clients.values()]
+            retired_clients = list(self._retired_clients)
+            self._provider_clients.clear()
+            self._retired_clients.clear()
+
+        for client in [*active_clients, *retired_clients]:
+            await client.aclose()
 
     def health(self) -> dict[str, Any]:
         config = self.config_store.get_config()
@@ -119,6 +135,7 @@ class ProxyService:
             )
 
         provider = config.providers[route.provider]
+        client = await self._get_provider_client(provider)
         upstream_stream = normalized.stream or route.force_stream
         outbound_request = replace(normalized, stream=upstream_stream)
         try:
@@ -148,6 +165,7 @@ class ProxyService:
 
         if upstream_stream and normalized.stream:
             return await self._handle_stream(
+                client=client,
                 inbound_protocol=inbound_protocol,
                 outbound_protocol=route.protocol,
                 url=url,
@@ -159,6 +177,7 @@ class ProxyService:
 
         if upstream_stream:
             return await self._handle_stream_to_json(
+                client=client,
                 inbound_protocol=inbound_protocol,
                 outbound_protocol=route.protocol,
                 url=url,
@@ -170,6 +189,7 @@ class ProxyService:
             )
 
         return await self._handle_json(
+            client=client,
             inbound_protocol=inbound_protocol,
             outbound_protocol=route.protocol,
             url=url,
@@ -182,6 +202,7 @@ class ProxyService:
 
     async def _handle_json(
         self,
+        client: httpx.AsyncClient,
         inbound_protocol: ProtocolName,
         outbound_protocol: ProtocolName,
         url: str,
@@ -192,7 +213,7 @@ class ProxyService:
         started_at: float,
     ) -> JSONResponse:
         try:
-            response = await self.client.post(url, headers=headers, json=payload, timeout=timeout)
+            response = await client.post(url, headers=headers, json=payload, timeout=timeout)
         except httpx.HTTPError as exc:
             raise ProxyError(502, f"Upstream request failed: {exc}") from exc
 
@@ -225,6 +246,7 @@ class ProxyService:
 
     async def _handle_stream_to_json(
         self,
+        client: httpx.AsyncClient,
         inbound_protocol: ProtocolName,
         outbound_protocol: ProtocolName,
         url: str,
@@ -234,7 +256,7 @@ class ProxyService:
         normalized_request,
         started_at: float,
     ) -> JSONResponse:
-        request_context = self.client.stream(
+        request_context = client.stream(
             "POST",
             url,
             headers=headers,
@@ -279,6 +301,7 @@ class ProxyService:
 
     async def _handle_stream(
         self,
+        client: httpx.AsyncClient,
         inbound_protocol: ProtocolName,
         outbound_protocol: ProtocolName,
         url: str,
@@ -287,7 +310,7 @@ class ProxyService:
         timeout: float,
         started_at: float,
     ) -> StreamingResponse:
-        request_context = self.client.stream(
+        request_context = client.stream(
             "POST",
             url,
             headers=headers,
@@ -391,8 +414,9 @@ class ProxyService:
 
         url = join_endpoint(provider.base_url, "/v1/models")
         headers = self._build_provider_discovery_headers(provider)
+        client = await self._get_provider_client(provider)
         try:
-            response = await self.client.get(url, headers=headers, timeout=timeout_seconds)
+            response = await client.get(url, headers=headers, timeout=timeout_seconds)
         except httpx.HTTPError as exc:
             self.logger.warning(
                 "provider_model_discovery_failed provider=%s error=%s",
@@ -457,6 +481,32 @@ class ProxyService:
             "models": models,
             "error": None,
         }
+
+    async def _get_provider_client(self, provider: ProviderConfig) -> httpx.AsyncClient:
+        proxy = None if self.transport is not None else provider.proxy
+
+        async with self._client_lock:
+            state = self._provider_clients.get(provider.name)
+            if state is not None and state.proxy == proxy:
+                return state.client
+
+            client = self._create_provider_client(proxy)
+            if state is not None:
+                # Keep stale clients alive until shutdown so in-flight requests can finish.
+                self._retired_clients.append(state.client)
+            self._provider_clients[provider.name] = _ProviderClientState(proxy=proxy, client=client)
+            return client
+
+    def _create_provider_client(self, proxy: str | None) -> httpx.AsyncClient:
+        client_kwargs: dict[str, Any] = {
+            "timeout": None,
+            "trust_env": False,
+        }
+        if self.transport is not None:
+            client_kwargs["transport"] = self.transport
+        elif proxy:
+            client_kwargs["proxy"] = proxy
+        return httpx.AsyncClient(**client_kwargs)
 
     async def _collect_stream_response(
         self,

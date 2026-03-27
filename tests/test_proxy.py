@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,8 @@ import pytest
 import yaml
 
 from nano_llm_api.app import create_app
+from nano_llm_api.config import ConfigStore, load_config
+from nano_llm_api.service import ProxyService
 
 pytestmark = pytest.mark.anyio
 
@@ -54,6 +57,125 @@ def make_config(tmp_path: Path, *, force_stream_openai_chat: bool = False) -> Pa
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     return path
+
+
+def test_load_config_parses_provider_proxy(tmp_path: Path):
+    config = {
+        "providers": {
+            "openai": {
+                "base_url": "https://openai.test",
+                "api_key": "openai-test-key",
+                "proxy": "http://127.0.0.1:7890",
+            }
+        },
+        "models": {
+            "gpt-chat": {
+                "provider": "openai",
+                "protocol": "openai_chat",
+                "target_model": "gpt-4o-mini",
+            }
+        },
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    loaded = load_config(path)
+
+    assert loaded.providers["openai"].proxy == "http://127.0.0.1:7890"
+
+
+async def test_provider_proxy_client_cache_reload_and_transport_bypass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = {
+        "server": {
+            "host": "127.0.0.1",
+            "port": 8080,
+            "log_level": "INFO",
+            "log_file": str(tmp_path / "logs" / "test.log"),
+            "timeout_seconds": 60,
+        },
+        "providers": {
+            "openai": {
+                "base_url": "https://openai.test",
+                "api_key": "openai-test-key",
+                "proxy": "http://127.0.0.1:7890",
+            },
+            "anthropic": {
+                "base_url": "https://anthropic.test",
+                "api_key": "anthropic-test-key",
+                "proxy": "http://127.0.0.1:7891",
+                "headers": {"anthropic-version": "2023-06-01"},
+            },
+        },
+        "models": {
+            "gpt-chat": {
+                "provider": "openai",
+                "protocol": "openai_chat",
+                "target_model": "gpt-4o-mini",
+            },
+            "claude": {
+                "provider": "anthropic",
+                "protocol": "anthropic_messages",
+                "target_model": "claude-3-7-sonnet-latest",
+            },
+        },
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    created_clients: list[object] = []
+
+    class RecordingAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.closed = False
+            created_clients.append(self)
+
+        async def aclose(self):
+            self.closed = True
+
+    monkeypatch.setattr("nano_llm_api.service.httpx.AsyncClient", RecordingAsyncClient)
+
+    service = ProxyService(ConfigStore(path))
+    initial_config = service.config_store.get_config()
+    openai_client = await service._get_provider_client(initial_config.providers["openai"])
+    anthropic_client = await service._get_provider_client(initial_config.providers["anthropic"])
+
+    assert openai_client.kwargs["proxy"] == "http://127.0.0.1:7890"
+    assert anthropic_client.kwargs["proxy"] == "http://127.0.0.1:7891"
+    assert openai_client.kwargs["trust_env"] is False
+    assert anthropic_client.kwargs["trust_env"] is False
+    assert await service._get_provider_client(initial_config.providers["openai"]) is openai_client
+
+    config["providers"]["openai"]["proxy"] = "http://127.0.0.1:7892"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    updated_mtime_ns = path.stat().st_mtime_ns + 1
+    os.utime(path, ns=(updated_mtime_ns, updated_mtime_ns))
+
+    reloaded_config = service.config_store.get_config()
+    reloaded_openai_client = await service._get_provider_client(reloaded_config.providers["openai"])
+
+    assert reloaded_openai_client is not openai_client
+    assert reloaded_openai_client.kwargs["proxy"] == "http://127.0.0.1:7892"
+    assert not openai_client.closed
+
+    await service.close()
+    assert all(client.closed for client in created_clients)
+
+    bypass_service = ProxyService(
+        ConfigStore(path),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True})),
+    )
+    bypass_config = bypass_service.config_store.get_config()
+    bypass_client = await bypass_service._get_provider_client(bypass_config.providers["openai"])
+
+    assert bypass_client.kwargs["transport"] is not None
+    assert "proxy" not in bypass_client.kwargs
+    assert bypass_client.kwargs["trust_env"] is False
+
+    await bypass_service.close()
 
 
 async def test_openai_chat_inbound_to_anthropic_non_stream(tmp_path: Path):
