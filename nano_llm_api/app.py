@@ -52,6 +52,11 @@ def create_app(
         service: ProxyService = request.app.state.proxy_service
         return service.list_models()
 
+    @app.get("/v1/provider-models")
+    async def list_provider_models(request: Request):
+        service: ProxyService = request.app.state.proxy_service
+        return await service.list_provider_models()
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         return await _proxy_request(request, OPENAI_CHAT)

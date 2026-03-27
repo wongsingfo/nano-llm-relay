@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import ConfigStore, ProviderConfig
-from .models import ProtocolName, StreamEvent
+from .models import MessageBlock, NormalizedResponse, ProtocolName, StreamEvent, UsageStats
 from .protocols import (
     ANTHROPIC_MESSAGES,
     OPENAI_CHAT,
@@ -70,6 +73,24 @@ class ProxyService:
             )
         return {"object": "list", "data": data}
 
+    async def list_provider_models(self) -> dict[str, Any]:
+        config = self.config_store.get_config()
+        provider_names = sorted(config.providers)
+        self.logger.info("provider_model_discovery providers=%s", ",".join(provider_names))
+        results = await asyncio.gather(
+            *[
+                self._discover_provider_models(
+                    provider_name=name,
+                    provider=config.providers[name],
+                    discovery_protocol=self._provider_discovery_protocol(name, config.models),
+                    timeout_seconds=config.providers[name].timeout_seconds
+                    or config.server.timeout_seconds,
+                )
+                for name in provider_names
+            ]
+        )
+        return {"object": "provider_model_list", "data": results}
+
     async def handle_request(
         self,
         inbound_protocol: ProtocolName,
@@ -98,8 +119,10 @@ class ProxyService:
             )
 
         provider = config.providers[route.provider]
+        upstream_stream = normalized.stream or route.force_stream
+        outbound_request = replace(normalized, stream=upstream_stream)
         try:
-            payload = serialize_request(route.protocol, route.target_model, normalized)
+            payload = serialize_request(route.protocol, route.target_model, outbound_request)
         except ProtocolError as exc:
             raise ProxyError(400, str(exc)) from exc
         payload.update(route.extra_body)
@@ -109,20 +132,21 @@ class ProxyService:
             provider=provider,
             protocol=route.protocol,
             inbound_headers=inbound_headers,
-            stream=normalized.stream,
+            stream=upstream_stream,
         )
         timeout = route.timeout_seconds or provider.timeout_seconds or config.server.timeout_seconds
 
         self.logger.info(
-            "proxy_request inbound=%s outbound=%s model=%s target_model=%s stream=%s",
+            "proxy_request inbound=%s outbound=%s model=%s target_model=%s stream=%s upstream_stream=%s",
             inbound_protocol,
             route.protocol,
             normalized.model,
             route.target_model,
             normalized.stream,
+            upstream_stream,
         )
 
-        if normalized.stream:
+        if upstream_stream and normalized.stream:
             return await self._handle_stream(
                 inbound_protocol=inbound_protocol,
                 outbound_protocol=route.protocol,
@@ -130,6 +154,18 @@ class ProxyService:
                 headers=headers,
                 payload=payload,
                 timeout=timeout,
+                started_at=started_at,
+            )
+
+        if upstream_stream:
+            return await self._handle_stream_to_json(
+                inbound_protocol=inbound_protocol,
+                outbound_protocol=route.protocol,
+                url=url,
+                headers=headers,
+                payload=payload,
+                timeout=timeout,
+                normalized_request=normalized,
                 started_at=started_at,
             )
 
@@ -183,6 +219,60 @@ class ProxyService:
             inbound_protocol,
             outbound_protocol,
             response.status_code,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return JSONResponse(final_payload)
+
+    async def _handle_stream_to_json(
+        self,
+        inbound_protocol: ProtocolName,
+        outbound_protocol: ProtocolName,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        timeout: float,
+        normalized_request,
+        started_at: float,
+    ) -> JSONResponse:
+        request_context = self.client.stream(
+            "POST",
+            url,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+        try:
+            upstream_response = await request_context.__aenter__()
+        except httpx.HTTPError as exc:
+            raise ProxyError(502, f"Upstream streaming request failed: {exc}") from exc
+
+        if upstream_response.status_code >= 400:
+            details = self._safe_error_body(upstream_response)
+            await request_context.__aexit__(None, None, None)
+            raise ProxyError(
+                upstream_response.status_code,
+                "Upstream provider returned an error.",
+                details,
+            )
+
+        try:
+            normalized_response = await self._collect_stream_response(
+                outbound_protocol=outbound_protocol,
+                upstream_response=upstream_response,
+            )
+            final_payload = serialize_response(inbound_protocol, normalized_request, normalized_response)
+        except ProxyError:
+            raise
+        except ProtocolError as exc:
+            raise ProxyError(502, str(exc)) from exc
+        finally:
+            await request_context.__aexit__(None, None, None)
+
+        self.logger.info(
+            "proxy_response inbound=%s outbound=%s status=%s duration_ms=%.2f",
+            inbound_protocol,
+            outbound_protocol,
+            upstream_response.status_code,
             (time.perf_counter() - started_at) * 1000,
         )
         return JSONResponse(final_payload)
@@ -279,3 +369,275 @@ class ProxyService:
             return response.json()
         except Exception:
             return response.text
+
+    async def _discover_provider_models(
+        self,
+        provider_name: str,
+        provider: ProviderConfig,
+        discovery_protocol: str | None,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        if discovery_protocol != "openai_models":
+            self.logger.warning(
+                "provider_model_discovery_unsupported provider=%s",
+                provider_name,
+            )
+            return self._provider_discovery_error(
+                provider_name=provider_name,
+                discovery_protocol=discovery_protocol,
+                error_type="unsupported_provider",
+                message="Provider model discovery currently supports only providers with OpenAI-compatible routes.",
+            )
+
+        url = join_endpoint(provider.base_url, "/v1/models")
+        headers = self._build_provider_discovery_headers(provider)
+        try:
+            response = await self.client.get(url, headers=headers, timeout=timeout_seconds)
+        except httpx.HTTPError as exc:
+            self.logger.warning(
+                "provider_model_discovery_failed provider=%s error=%s",
+                provider_name,
+                exc,
+            )
+            return self._provider_discovery_error(
+                provider_name=provider_name,
+                discovery_protocol=discovery_protocol,
+                error_type="request_failed",
+                message=f"Provider model discovery request failed: {exc}",
+            )
+
+        if response.status_code >= 400:
+            details = self._safe_error_body(response)
+            self.logger.warning(
+                "provider_model_discovery_upstream_error provider=%s status=%s",
+                provider_name,
+                response.status_code,
+            )
+            return self._provider_discovery_error(
+                provider_name=provider_name,
+                discovery_protocol=discovery_protocol,
+                error_type="upstream_error",
+                message="Provider returned an error while listing models.",
+                details={"status_code": response.status_code, "body": details},
+            )
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError:
+            self.logger.warning(
+                "provider_model_discovery_invalid_json provider=%s",
+                provider_name,
+            )
+            return self._provider_discovery_error(
+                provider_name=provider_name,
+                discovery_protocol=discovery_protocol,
+                error_type="invalid_response",
+                message="Provider returned non-JSON model listing response.",
+            )
+
+        try:
+            models = self._normalize_openai_models(payload)
+        except ValueError as exc:
+            self.logger.warning(
+                "provider_model_discovery_invalid_shape provider=%s error=%s",
+                provider_name,
+                exc,
+            )
+            return self._provider_discovery_error(
+                provider_name=provider_name,
+                discovery_protocol=discovery_protocol,
+                error_type="invalid_response",
+                message=str(exc),
+            )
+
+        return {
+            "provider": provider_name,
+            "status": "ok",
+            "discovery_protocol": discovery_protocol,
+            "models": models,
+            "error": None,
+        }
+
+    async def _collect_stream_response(
+        self,
+        outbound_protocol: ProtocolName,
+        upstream_response: httpx.Response,
+    ) -> NormalizedResponse:
+        response_id = f"resp_{uuid4().hex}"
+        model = ""
+        created = int(time.time())
+        stop_reason = "stop"
+        usage = UsageStats()
+        item_order: list[str] = []
+        items: dict[str, dict[str, Any]] = {}
+
+        async for event in iter_normalized_stream(outbound_protocol, upstream_response):
+            if event.response_id:
+                response_id = event.response_id
+            if event.model is not None:
+                model = event.model
+            if event.created is not None:
+                created = event.created
+
+            if event.type == "error":
+                raise ProxyError(
+                    502,
+                    "Upstream provider stream returned an error.",
+                    self._parse_error_details(event.message),
+                )
+
+            if event.type == "response_finished":
+                stop_reason = event.stop_reason or stop_reason
+                if event.usage is not None:
+                    usage = event.usage
+                continue
+
+            if event.type == "text_delta":
+                item_key = event.item_key or "message"
+                item = items.get(item_key)
+                if item is None:
+                    item = {"type": "text", "text_parts": []}
+                    items[item_key] = item
+                    item_order.append(item_key)
+                item["text_parts"].append(event.text or "")
+                continue
+
+            if event.type in {"tool_call_started", "tool_call_delta", "tool_call_finished"}:
+                item_key = event.item_key or event.tool_call_id or f"tool:{len(item_order)}"
+                item = items.get(item_key)
+                if item is None:
+                    item = {
+                        "type": "tool_use",
+                        "tool_call_id": event.tool_call_id,
+                        "tool_name": event.tool_name,
+                        "arguments_parts": [],
+                    }
+                    items[item_key] = item
+                    item_order.append(item_key)
+                if event.tool_call_id:
+                    item["tool_call_id"] = event.tool_call_id
+                if event.tool_name:
+                    item["tool_name"] = event.tool_name
+                if event.arguments:
+                    item["arguments_parts"].append(event.arguments)
+
+        blocks: list[MessageBlock] = []
+        for item_key in item_order:
+            item = items[item_key]
+            if item["type"] == "text":
+                text = "".join(item["text_parts"])
+                if text:
+                    blocks.append(MessageBlock(type="text", text=text))
+                continue
+            arguments = "".join(item["arguments_parts"])
+            blocks.append(
+                MessageBlock(
+                    type="tool_use",
+                    tool_call_id=item.get("tool_call_id") or f"call_{uuid4().hex}",
+                    tool_name=item.get("tool_name") or "tool",
+                    tool_input=self._parse_tool_arguments(arguments),
+                )
+            )
+
+        return NormalizedResponse(
+            response_id=response_id,
+            model=model,
+            created=created,
+            blocks=blocks,
+            stop_reason=stop_reason,
+            usage=usage,
+        )
+
+    def _parse_error_details(self, message: str | None) -> Any:
+        if message is None:
+            return None
+        try:
+            return json.loads(message)
+        except Exception:
+            return message
+
+    def _provider_discovery_protocol(
+        self,
+        provider_name: str,
+        models: Mapping[str, Any],
+    ) -> str | None:
+        route_protocols = {
+            route.protocol
+            for route in models.values()
+            if route.provider == provider_name
+        }
+        if route_protocols & {OPENAI_CHAT, OPENAI_RESPONSES}:
+            return "openai_models"
+        return None
+
+    def _build_provider_discovery_headers(self, provider: ProviderConfig) -> dict[str, str]:
+        headers = {"accept": "application/json"}
+        headers.update(provider.headers)
+
+        api_key = provider.resolved_api_key()
+        if api_key:
+            header_name = provider.auth_header or "Authorization"
+            prefix = provider.auth_prefix
+            if prefix is None and header_name.lower() == "authorization":
+                prefix = "Bearer"
+            headers[header_name] = f"{prefix} {api_key}".strip() if prefix else api_key
+
+        return headers
+
+    def _normalize_openai_models(self, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise ValueError("Provider model listing response must be a JSON object.")
+
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise ValueError("Provider model listing response is missing `data` list.")
+
+        models: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise ValueError("Provider model listing contains a non-object entry.")
+            model_id = item.get("id")
+            if model_id is None or str(model_id).strip() == "":
+                raise ValueError("Provider model listing entry is missing `id`.")
+
+            normalized: dict[str, Any] = {"id": str(model_id)}
+            if item.get("object") is not None:
+                normalized["object"] = str(item["object"])
+            if item.get("owned_by") is not None:
+                normalized["owned_by"] = str(item["owned_by"])
+            created = item.get("created")
+            if created is not None:
+                try:
+                    normalized["created"] = int(created)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Provider model listing entry has invalid `created`.") from exc
+            models.append(normalized)
+        return models
+
+    def _provider_discovery_error(
+        self,
+        provider_name: str,
+        discovery_protocol: str | None,
+        error_type: str,
+        message: str,
+        details: Any | None = None,
+    ) -> dict[str, Any]:
+        error = {"type": error_type, "message": message}
+        if details is not None:
+            error["details"] = details
+        return {
+            "provider": provider_name,
+            "status": "error",
+            "discovery_protocol": discovery_protocol,
+            "models": [],
+            "error": error,
+        }
+
+    def _parse_tool_arguments(self, arguments: str) -> Any:
+        stripped = arguments.strip()
+        if not stripped:
+            return {}
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return arguments

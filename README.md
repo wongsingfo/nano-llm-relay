@@ -1,43 +1,45 @@
 # nano-llm-api
 
-一个极简的本地 LLM 代理服务，目标是用尽量少的依赖把 OpenAI 和 Anthropic 两套常见协议桥接起来，支持本地工具链通过统一入口去访问不同后端模型。
+`nano-llm-api` is a minimal local LLM proxy that bridges the two most common API dialects, OpenAI and Anthropic, with as few dependencies as possible. The goal is to give local tools a single endpoint that can forward requests to different backend models without pulling in the heavier operational surface area of a full gateway.
 
-## 当前支持
+## Current support
 
-- 入站协议：
+- Inbound protocols:
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
   - `POST /v1/messages`
-- 出站协议：
+- Outbound protocols:
   - `openai_chat`
   - `openai_responses`
   - `anthropic_messages`
-- 其他接口：
-  - `GET /v1/models`
+- Additional endpoints:
+  - `GET /`
   - `GET /healthz`
-- 能力范围：
-  - 文本请求与响应
-  - 函数工具调用
-  - SSE 流式转发与事件形状转换
-  - YAML 配置热重载
-  - 文件日志
+  - `GET /v1/models`
+  - `GET /v1/provider-models`
+- Capabilities:
+  - Text request and response translation
+  - Function/tool call translation
+  - SSE streaming passthrough with event-shape conversion
+  - YAML config hot reload
+  - File-based logging
 
-## 非目标
+## Non-goals
 
-- 数据库、鉴权后台、负载均衡、管理 UI
-- 多模态块、MCP、自定义工具类型的完整兼容
-- 维护服务端会话状态；`previous_response_id` 只会原样转发给 `openai_responses` 类型后端
+- Databases, auth backends, load balancing, or admin UI
+- Full compatibility for multimodal blocks, MCP, or custom tool types
+- Server-side conversation state management; `previous_response_id` is only forwarded as-is to `openai_responses` backends
 
-## 安装
+## Installation
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 ```
 
-## 配置
+## Configuration
 
-从 [config.example.yaml](/home/chengke/Public/nano-llm-api/config.example.yaml) 开始，复制为 `config.yaml` 后修改模型映射和密钥来源。
+Start from [`config.example.yaml`](config.example.yaml), copy it to `config.yaml`, then adjust provider settings, model routes, and credential sources.
 
 ```yaml
 providers:
@@ -54,30 +56,41 @@ models:
     target_model: claude-3-7-sonnet-latest
 ```
 
-关键字段：
+Important fields:
 
-- `providers.<name>.base_url`: 上游根地址
-- `providers.<name>.api_key` 或 `api_key_env`: 上游密钥
-- `providers.<name>.auth_header` / `auth_prefix`: 自定义鉴权头，适配非标准 OpenAI 兼容后端
-- `models.<alias>.protocol`: 目标协议类型
-- `models.<alias>.target_model`: 实际发给上游的模型名
-- `models.<alias>.extra_body`: 额外固定字段，会合并到上游请求体
+- `server.host` / `server.port`: bind address for the local proxy
+- `server.log_file`: file path for proxy logs
+- `server.timeout_seconds`: default upstream timeout
+- `providers.<name>.base_url`: upstream API base URL
+- `providers.<name>.api_key` or `api_key_env`: upstream API key source
+- `providers.<name>.auth_header` / `auth_prefix`: custom auth header settings for non-standard OpenAI-compatible backends
+- `providers.<name>.headers`: extra static headers sent to the upstream provider
+- `models.<alias>.protocol`: target upstream protocol
+- `models.<alias>.target_model`: model name sent to the upstream provider
+- `models.<alias>.endpoint`: optional endpoint override for that route
+- `models.<alias>.extra_body`: extra fixed fields merged into the upstream request body
 
-## 启动
+The config is reloaded automatically when the YAML file changes on disk.
+
+`GET /v1/models` returns local alias routes configured in `models`.
+
+`GET /v1/provider-models` performs live upstream discovery for each configured provider. In v1 it supports providers with at least one `openai_chat` or `openai_responses` route and queries their OpenAI-compatible `GET /v1/models` endpoint. Providers that are not yet supported for discovery are returned with a provider-scoped error entry instead of failing the whole response.
+
+## Running
 
 ```bash
 NANO_LLM_CONFIG=config.yaml .venv/bin/nano-llm-api
 ```
 
-或直接：
+Or directly:
 
 ```bash
 NANO_LLM_CONFIG=config.yaml .venv/bin/python -m nano_llm_api
 ```
 
-## 示例
+## Examples
 
-OpenAI chat 客户端请求 Anthropic 后端：
+OpenAI Chat client calling an Anthropic backend:
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -88,7 +101,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Anthropic 客户端请求 OpenAI chat 后端：
+Anthropic client calling an OpenAI Chat backend:
 
 ```bash
 curl http://127.0.0.1:8080/v1/messages \
@@ -101,10 +114,16 @@ curl http://127.0.0.1:8080/v1/messages \
   }'
 ```
 
-## 测试
+List live supported models per provider:
+
+```bash
+curl http://127.0.0.1:8080/v1/provider-models
+```
+
+## Testing
 
 ```bash
 .venv/bin/pytest
 ```
 
-测试使用 `httpx.MockTransport`，不会访问外网。
+The test suite uses `httpx.MockTransport`, so it does not make external network calls.

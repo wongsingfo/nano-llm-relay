@@ -12,7 +12,7 @@ from nano_llm_api.app import create_app
 pytestmark = pytest.mark.anyio
 
 
-def make_config(tmp_path: Path) -> Path:
+def make_config(tmp_path: Path, *, force_stream_openai_chat: bool = False) -> Path:
     config = {
         "server": {
             "host": "127.0.0.1",
@@ -42,6 +42,7 @@ def make_config(tmp_path: Path) -> Path:
                 "provider": "openai",
                 "protocol": "openai_chat",
                 "target_model": "gpt-4o-mini",
+                **({"force_stream": True} if force_stream_openai_chat else {}),
             },
             "gpt-responses": {
                 "provider": "openai",
@@ -157,6 +158,57 @@ async def test_anthropic_inbound_to_openai_chat_stream(tmp_path: Path):
     assert "event: message_stop" in body
 
 
+async def test_anthropic_inbound_to_openai_chat_non_stream_with_forced_upstream_stream(
+    tmp_path: Path,
+):
+    config_path = make_config(tmp_path, force_stream_openai_chat=True)
+    sse_payload = (
+        'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,'
+        '"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+        'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,'
+        '"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
+        'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,'
+        '"model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode("utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://openai.test/v1/chat/completions"
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["stream"] is True
+        assert payload["messages"] == [
+            {"role": "user", "content": "Say hello"},
+        ]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse_payload,
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/messages",
+                headers={"anthropic-version": "2023-06-01"},
+                json={
+                    "model": "gpt-chat",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "Say hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["content"] == [{"type": "text", "text": "Hello"}]
+    assert body["stop_reason"] == "end_turn"
+    assert body["usage"] == {"input_tokens": 5, "output_tokens": 2}
+
+
 async def test_openai_responses_inbound_to_anthropic_tool_call(tmp_path: Path):
     config_path = make_config(tmp_path)
 
@@ -246,3 +298,164 @@ async def test_list_models(tmp_path: Path):
     assert response.status_code == 200
     data = response.json()["data"]
     assert {item["id"] for item in data} == {"claude", "gpt-chat", "gpt-responses"}
+
+
+async def test_list_provider_models(tmp_path: Path):
+    config_path = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "https://openai.test/v1/models"
+        assert request.headers["authorization"] == "Bearer openai-test-key"
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "gpt-4o-mini",
+                        "object": "model",
+                        "created": 1,
+                        "owned_by": "openai",
+                    }
+                ],
+            },
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/v1/provider-models")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "provider_model_list"
+    providers = {item["provider"]: item for item in body["data"]}
+    assert providers["openai"] == {
+        "provider": "openai",
+        "status": "ok",
+        "discovery_protocol": "openai_models",
+        "models": [
+            {
+                "id": "gpt-4o-mini",
+                "object": "model",
+                "created": 1,
+                "owned_by": "openai",
+            }
+        ],
+        "error": None,
+    }
+    assert providers["anthropic"]["status"] == "error"
+    assert providers["anthropic"]["discovery_protocol"] is None
+    assert providers["anthropic"]["models"] == []
+    assert providers["anthropic"]["error"]["type"] == "unsupported_provider"
+
+
+async def test_list_provider_models_handles_upstream_failure(tmp_path: Path):
+    config_path = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://openai.test/v1/models"
+        raise httpx.ConnectError("boom", request=request)
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/v1/provider-models")
+
+    assert response.status_code == 200
+    providers = {item["provider"]: item for item in response.json()["data"]}
+    assert providers["openai"]["status"] == "error"
+    assert providers["openai"]["error"]["type"] == "request_failed"
+    assert "boom" in providers["openai"]["error"]["message"]
+    assert providers["anthropic"]["error"]["type"] == "unsupported_provider"
+
+
+async def test_list_provider_models_handles_invalid_json(tmp_path: Path):
+    config_path = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://openai.test/v1/models"
+        return httpx.Response(
+            200,
+            text="not-json",
+            headers={"content-type": "application/json"},
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/v1/provider-models")
+
+    assert response.status_code == 200
+    providers = {item["provider"]: item for item in response.json()["data"]}
+    assert providers["openai"]["status"] == "error"
+    assert providers["openai"]["error"]["type"] == "invalid_response"
+
+
+async def test_list_provider_models_uses_custom_auth_header(tmp_path: Path):
+    config = {
+        "server": {
+            "host": "127.0.0.1",
+            "port": 8080,
+            "log_level": "INFO",
+            "log_file": str(tmp_path / "logs" / "test.log"),
+            "timeout_seconds": 60,
+        },
+        "providers": {
+            "custom-openai": {
+                "base_url": "https://custom-openai.test",
+                "api_key": "custom-test-key",
+                "auth_header": "x-api-key",
+                "auth_prefix": "",
+                "headers": {"x-tenant": "local"},
+            }
+        },
+        "models": {
+            "custom-gpt": {
+                "provider": "custom-openai",
+                "protocol": "openai_chat",
+                "target_model": "gpt-custom",
+            }
+        },
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "custom-test-key"
+        assert request.headers["x-tenant"] == "local"
+        assert "authorization" not in request.headers
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "gpt-custom"}]},
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/v1/provider-models")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body == [
+        {
+            "provider": "custom-openai",
+            "status": "ok",
+            "discovery_protocol": "openai_models",
+            "models": [{"id": "gpt-custom"}],
+            "error": None,
+        }
+    ]
