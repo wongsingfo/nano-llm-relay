@@ -127,6 +127,14 @@ def join_endpoint(base_url: str, endpoint: str) -> str:
         query = f"?{query}"
     base = base_url.rstrip("/")
     normalized = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    # Split query string from base so the path is appended before it.
+    if "?" in base_url:
+        base_path, query = base_url.split("?", 1)
+        base_path = base_path.rstrip("/")
+        if base_path.endswith("/v1") and normalized.startswith("/v1/"):
+            normalized = normalized[3:]
+        return f"{base_path}{normalized}?{query}"
+    base = base_url.rstrip("/")
     if base.endswith("/v1") and normalized.startswith("/v1/"):
         normalized = normalized[3:]
     return f"{base}{normalized}{query}"
@@ -991,16 +999,14 @@ async def _iter_anthropic_stream(response: httpx.Response) -> AsyncIterator[Stre
                     text=_require_string(delta.get("text"), "Anthropic text delta missing `text`."),
                 )
             elif delta_type == "input_json_delta":
+                partial = delta.get("partial_json") or ""
                 yield StreamEvent(
                     type="tool_call_delta",
                     response_id=response_id,
                     model=model,
                     created=created,
                     item_key=item_key,
-                    arguments=_require_string(
-                        delta.get("partial_json"),
-                        "Anthropic input_json_delta missing `partial_json`.",
-                    ),
+                    arguments=partial,
                 )
             continue
 
@@ -1976,15 +1982,15 @@ def _ensure_no_passthrough_responses_tools(
     request: NormalizedRequest,
     target_protocol: ProtocolName,
 ) -> None:
+    """Silently drop non-portable Responses passthrough tools when
+    the target protocol cannot handle them (e.g. ``web_search``
+    targeting Anthropic).  The tools are removed from the request
+    so serialization proceeds without error."""
     raw_tools = _responses_passthrough_tools(request)
     if not raw_tools:
         return
-    raw_types = sorted({str(tool.get("type") or "unknown") for tool in raw_tools})
-    raise ProtocolError(
-        "Responses tools of type "
-        f"{', '.join(f'`{tool_type}`' for tool_type in raw_types)} "
-        f"require an `{OPENAI_RESPONSES}` target, not `{target_protocol}`."
-    )
+    # Clear the stashed passthrough tools so they are not re-injected.
+    request.extra.pop(RESPONSES_PASSTHROUGH_TOOLS_KEY, None)
 
 
 def _normalize_role(value: Any) -> str:
