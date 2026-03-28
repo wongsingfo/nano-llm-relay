@@ -560,6 +560,57 @@ async def test_openai_responses_passthrough_tools_preserved_for_responses_target
     assert body["output"][0]["content"][0]["text"] == "done"
 
 
+async def test_anthropic_metadata_not_forwarded_to_responses_target(tmp_path: Path):
+    config_path = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://openai.test/v1/responses"
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["model"] == "gpt-4.1-mini"
+        assert "metadata" not in payload
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "gpt-4.1-mini",
+                "output": [
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 7, "output_tokens": 1, "total_tokens": 8},
+            },
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/messages",
+                headers={"anthropic-version": "2023-06-01"},
+                json={
+                    "model": "gpt-responses",
+                    "max_tokens": 64,
+                    "metadata": {"trace_id": "abc123"},
+                    "messages": [{"role": "user", "content": "Say hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["content"][0]["text"] == "done"
+
+
 async def test_openai_responses_model_reasoning_defaults_merge_with_request(tmp_path: Path):
     config = {
         "server": {

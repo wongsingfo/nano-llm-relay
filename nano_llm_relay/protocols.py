@@ -309,7 +309,6 @@ def _normalize_openai_responses_request(body: dict[str, Any]) -> NormalizedReque
             "background",
             "conversation",
             "include",
-            "metadata",
             "parallel_tool_calls",
             "reasoning",
             "store",
@@ -376,7 +375,6 @@ def _normalize_anthropic_request(body: dict[str, Any]) -> NormalizedRequest:
             body,
             {
                 "container",
-                "metadata",
                 "service_tier",
                 "thinking",
             },
@@ -447,7 +445,6 @@ def _serialize_openai_responses_request(
                 "background",
                 "conversation",
                 "include",
-                "metadata",
                 "parallel_tool_calls",
                 "reasoning",
                 "store",
@@ -457,6 +454,8 @@ def _serialize_openai_responses_request(
             },
         )
     )
+    if request.metadata and request.inbound_protocol == OPENAI_RESPONSES:
+        payload["metadata"] = request.metadata
     return payload
 
 
@@ -486,7 +485,9 @@ def _serialize_anthropic_request(target_model: str, request: NormalizedRequest) 
         if request.tool_choice is not None:
             payload["tool_choice"] = _tool_choice_to_anthropic(request.tool_choice)
 
-    payload.update(_pick_keys(request.extra, {"metadata", "service_tier", "thinking"}))
+    payload.update(_pick_keys(request.extra, {"service_tier", "thinking"}))
+    if request.metadata and request.inbound_protocol == ANTHROPIC_MESSAGES:
+        payload["metadata"] = request.metadata
     return payload
 
 
