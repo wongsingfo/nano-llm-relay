@@ -15,6 +15,18 @@ def encode_sse(data: str, event: str | None = None) -> bytes:
     return ("\n".join(lines) + "\n\n").encode("utf-8")
 
 
+async def iter_sse_json_lines(response: httpx.Response) -> AsyncIterator[str]:
+    """Yield raw JSON strings from SSE data fields, skipping [DONE] sentinels.
+
+    Used to bridge SSE passthrough into WebSocket JSON frames.
+    """
+    async for event in iter_sse_events(response):
+        data = event.get("data")
+        if data is None or data == "[DONE]":
+            continue
+        yield data
+
+
 async def iter_sse_events(response: httpx.Response) -> AsyncIterator[dict[str, str | None]]:
     event_name: str | None = None
     data_lines: list[str] = []
