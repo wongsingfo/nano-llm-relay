@@ -7,6 +7,45 @@ fail() {
     exit 1
 }
 
+has_arg() {
+    local needle=$1
+    shift
+
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "$needle" || "$arg" == "$needle="* ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+has_arg_pair() {
+    local needle=$1
+    local value=$2
+    shift 2
+
+    local arg
+    while [[ $# -gt 0 ]]; do
+        arg=$1
+        shift
+
+        if [[ "$arg" == "$needle" ]]; then
+            if [[ "${1-}" == "$value" ]]; then
+                return 0
+            fi
+            continue
+        fi
+
+        if [[ "$arg" == "$needle=$value" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 append_env_if_set() {
     local -n env_args_ref=$1
     local name=$2
@@ -224,8 +263,24 @@ main() {
         append_env_if_set bwrap_args "$env_name"
     done
 
+    local -a command_args=("$original_path")
+    case "$tool_name" in
+        codex)
+            if ! has_arg "--dangerously-bypass-approvals-and-sandbox" "$@"; then
+                command_args+=(--dangerously-bypass-approvals-and-sandbox)
+            fi
+            ;;
+        claude)
+            if ! has_arg "--dangerously-skip-permissions" "$@" \
+                && ! has_arg_pair "--permission-mode" "bypassPermissions" "$@"; then
+                command_args+=(--dangerously-skip-permissions)
+            fi
+            ;;
+    esac
+    command_args+=("$@")
+
     set -x
-    exec "$bwrap_path" "${bwrap_args[@]}" "$original_path" "$@"
+    exec "$bwrap_path" "${bwrap_args[@]}" "${command_args[@]}"
 }
 
 main "$@"

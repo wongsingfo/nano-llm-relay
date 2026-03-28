@@ -29,6 +29,21 @@ def parse_kv_output(stdout: str) -> dict[str, str]:
     return result
 
 
+def make_arg_printer(path: Path) -> Path:
+    return make_executable(
+        path,
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'argc=%s\n' "$#"
+index=1
+for arg in "$@"; do
+    printf 'arg%s=%s\n' "$index" "$arg"
+    index=$((index + 1))
+done
+""",
+    )
+
+
 def run_yolo_generic(command: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(SCRIPT_PATH), *command],
@@ -212,3 +227,179 @@ def test_yolo_generic_exposes_resolver_config(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip()
+
+
+@pytest.mark.skipif(not BWRAP_AVAILABLE, reason="bwrap is required for script integration tests")
+def test_yolo_generic_auto_adds_codex_danger_flag(tmp_path: Path):
+    home_dir = tmp_path / "home"
+    workdir = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    home_dir.mkdir()
+    workdir.mkdir()
+    bin_dir.mkdir()
+    (home_dir / ".cache").mkdir()
+    (home_dir / ".codex").mkdir()
+    ((home_dir / ".config") / "codex").mkdir(parents=True)
+    make_arg_printer(bin_dir / "codex")
+
+    env = os.environ.copy()
+    env.update({"HOME": str(home_dir), "PATH": f"{bin_dir}:{env['PATH']}"})
+
+    result = run_yolo_generic(["codex", "exec", "hello"], env=env, cwd=workdir)
+
+    assert result.returncode == 0, result.stderr
+    data = parse_kv_output(result.stdout)
+    assert data == {
+        "argc": "3",
+        "arg1": "--dangerously-bypass-approvals-and-sandbox",
+        "arg2": "exec",
+        "arg3": "hello",
+    }
+
+
+@pytest.mark.skipif(not BWRAP_AVAILABLE, reason="bwrap is required for script integration tests")
+def test_yolo_generic_auto_adds_claude_danger_flag(tmp_path: Path):
+    home_dir = tmp_path / "home"
+    workdir = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    home_dir.mkdir()
+    workdir.mkdir()
+    bin_dir.mkdir()
+    (home_dir / ".cache").mkdir()
+    (home_dir / ".claude").mkdir()
+    (home_dir / ".claude.json").write_text("{}", encoding="utf-8")
+    make_arg_printer(bin_dir / "claude")
+
+    env = os.environ.copy()
+    env.update({"HOME": str(home_dir), "PATH": f"{bin_dir}:{env['PATH']}"})
+
+    result = run_yolo_generic(["claude", "hello"], env=env, cwd=workdir)
+
+    assert result.returncode == 0, result.stderr
+    data = parse_kv_output(result.stdout)
+    assert data == {
+        "argc": "2",
+        "arg1": "--dangerously-skip-permissions",
+        "arg2": "hello",
+    }
+
+
+@pytest.mark.skipif(not BWRAP_AVAILABLE, reason="bwrap is required for script integration tests")
+def test_yolo_generic_does_not_duplicate_codex_danger_flag(tmp_path: Path):
+    home_dir = tmp_path / "home"
+    workdir = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    home_dir.mkdir()
+    workdir.mkdir()
+    bin_dir.mkdir()
+    (home_dir / ".cache").mkdir()
+    (home_dir / ".codex").mkdir()
+    ((home_dir / ".config") / "codex").mkdir(parents=True)
+    make_arg_printer(bin_dir / "codex")
+
+    env = os.environ.copy()
+    env.update({"HOME": str(home_dir), "PATH": f"{bin_dir}:{env['PATH']}"})
+
+    result = run_yolo_generic(
+        ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec"],
+        env=env,
+        cwd=workdir,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = parse_kv_output(result.stdout)
+    assert data == {
+        "argc": "2",
+        "arg1": "--dangerously-bypass-approvals-and-sandbox",
+        "arg2": "exec",
+    }
+
+
+@pytest.mark.skipif(not BWRAP_AVAILABLE, reason="bwrap is required for script integration tests")
+def test_yolo_generic_does_not_duplicate_claude_danger_flag(tmp_path: Path):
+    home_dir = tmp_path / "home"
+    workdir = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    home_dir.mkdir()
+    workdir.mkdir()
+    bin_dir.mkdir()
+    (home_dir / ".cache").mkdir()
+    (home_dir / ".claude").mkdir()
+    (home_dir / ".claude.json").write_text("{}", encoding="utf-8")
+    make_arg_printer(bin_dir / "claude")
+
+    env = os.environ.copy()
+    env.update({"HOME": str(home_dir), "PATH": f"{bin_dir}:{env['PATH']}"})
+
+    result = run_yolo_generic(
+        ["claude", "--dangerously-skip-permissions", "hello"],
+        env=env,
+        cwd=workdir,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = parse_kv_output(result.stdout)
+    assert data == {
+        "argc": "2",
+        "arg1": "--dangerously-skip-permissions",
+        "arg2": "hello",
+    }
+
+
+@pytest.mark.skipif(not BWRAP_AVAILABLE, reason="bwrap is required for script integration tests")
+def test_yolo_generic_skips_claude_danger_when_permission_mode_bypass_is_set(tmp_path: Path):
+    home_dir = tmp_path / "home"
+    workdir = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    home_dir.mkdir()
+    workdir.mkdir()
+    bin_dir.mkdir()
+    (home_dir / ".cache").mkdir()
+    (home_dir / ".claude").mkdir()
+    (home_dir / ".claude.json").write_text("{}", encoding="utf-8")
+    make_arg_printer(bin_dir / "claude")
+
+    env = os.environ.copy()
+    env.update({"HOME": str(home_dir), "PATH": f"{bin_dir}:{env['PATH']}"})
+
+    result = run_yolo_generic(
+        ["claude", "--permission-mode", "bypassPermissions", "hello"],
+        env=env,
+        cwd=workdir,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = parse_kv_output(result.stdout)
+    assert data == {
+        "argc": "3",
+        "arg1": "--permission-mode",
+        "arg2": "bypassPermissions",
+        "arg3": "hello",
+    }
+
+
+@pytest.mark.skipif(not BWRAP_AVAILABLE, reason="bwrap is required for script integration tests")
+def test_yolo_generic_matches_path_based_codex_by_basename(tmp_path: Path):
+    home_dir = tmp_path / "home"
+    workdir = tmp_path / "work"
+    bin_dir = tmp_path / "bin"
+    home_dir.mkdir()
+    workdir.mkdir()
+    bin_dir.mkdir()
+    (home_dir / ".cache").mkdir()
+    (home_dir / ".codex").mkdir()
+    ((home_dir / ".config") / "codex").mkdir(parents=True)
+    codex_path = make_arg_printer(bin_dir / "codex")
+
+    env = os.environ.copy()
+    env.update({"HOME": str(home_dir), "PATH": env["PATH"]})
+
+    result = run_yolo_generic([str(codex_path), "exec"], env=env, cwd=workdir)
+
+    assert result.returncode == 0, result.stderr
+    data = parse_kv_output(result.stdout)
+    assert data == {
+        "argc": "2",
+        "arg1": "--dangerously-bypass-approvals-and-sandbox",
+        "arg2": "exec",
+    }
