@@ -2,7 +2,7 @@ server:
   host: 127.0.0.1
   port: 8080
   log_level: INFO
-  log_file: logs/nano-llm-api.log
+  log_file: logs/nano-llm-relay.log
   timeout_seconds: 600
 
 providers:

@@ -18,7 +18,7 @@ def create_app(
     config_path: str | None = None,
     transport=None,
 ) -> FastAPI:
-    resolved_config_path = config_path or os.environ.get("NANO_LLM_CONFIG", "config.yaml")
+    resolved_config_path = config_path or os.environ.get("NANO_LLM_RELAY_CONFIG", "config.yaml")
     config_store = ConfigStore(resolved_config_path)
     config = config_store.get_config()
     logger = setup_logging(config.server)
@@ -30,7 +30,7 @@ def create_app(
         yield
         await service.close()
 
-    app = FastAPI(title="nano-llm-api", lifespan=lifespan)
+    app = FastAPI(title="nano-llm-relay", lifespan=lifespan)
 
     @app.exception_handler(ProxyError)
     async def handle_proxy_error(_: Request, exc: ProxyError) -> JSONResponse:
@@ -49,7 +49,7 @@ def create_app(
 
     @app.get("/")
     async def root():
-        return {"name": "nano-llm-api", "status": "ok"}
+        return {"name": "nano-llm-relay", "status": "ok"}
 
     @app.get("/healthz")
     async def healthz(request: Request):
@@ -92,7 +92,7 @@ def create_app(
 
 
 def main() -> None:
-    config_path = os.environ.get("NANO_LLM_CONFIG", "config.yaml")
+    config_path = os.environ.get("NANO_LLM_RELAY_CONFIG", "config.yaml")
     config = ConfigStore(config_path).get_config()
     uvicorn.run(
         create_app(config_path=config_path),

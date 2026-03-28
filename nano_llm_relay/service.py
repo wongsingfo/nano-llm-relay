@@ -29,6 +29,9 @@ from .protocols import (
     serialize_response,
 )
 
+_DEBUG_LOG_STRING_LIMIT = 100
+_DEBUG_LOG_STRING_SUFFIX = " ..."
+
 
 class ProxyError(Exception):
     def __init__(self, status_code: int, message: str, details: Any | None = None):
@@ -51,7 +54,7 @@ class ProxyService:
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.config_store = config_store
-        self.logger = logging.getLogger("nano_llm_api")
+        self.logger = logging.getLogger("nano_llm_relay")
         self.transport = transport
         self._client_lock = asyncio.Lock()
         self._provider_clients: dict[str, _ProviderClientState] = {}
@@ -84,7 +87,7 @@ class ProxyService:
                     "id": name,
                     "object": "model",
                     "created": 0,
-                    "owned_by": f"nano-llm-api/{route.provider}",
+                    "owned_by": f"nano-llm-relay/{route.provider}",
                 }
             )
         return {"object": "list", "data": data}
@@ -353,10 +356,11 @@ class ProxyService:
     def _log_inbound_request(self, inbound_protocol: ProtocolName, body: dict[str, Any]) -> None:
         if not self.logger.isEnabledFor(logging.DEBUG):
             return
+        sanitized_body = _truncate_debug_log_value(body)
         try:
-            serialized_body = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+            serialized_body = json.dumps(sanitized_body, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
-            serialized_body = repr(body)
+            serialized_body = repr(sanitized_body)
         self.logger.debug(
             "proxy_inbound_request inbound=%s body=%s",
             inbound_protocol,
@@ -717,3 +721,17 @@ class ProxyService:
             return json.loads(stripped)
         except json.JSONDecodeError:
             return arguments
+
+
+def _truncate_debug_log_value(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) <= _DEBUG_LOG_STRING_LIMIT:
+            return value
+        return f"{value[:_DEBUG_LOG_STRING_LIMIT]}{_DEBUG_LOG_STRING_SUFFIX}"
+    if isinstance(value, Mapping):
+        return {key: _truncate_debug_log_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_truncate_debug_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_truncate_debug_log_value(item) for item in value)
+    return value

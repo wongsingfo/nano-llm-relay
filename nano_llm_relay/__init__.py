@@ -1,4 +1,4 @@
-"""nano-llm-api package."""
+"""nano-llm-relay package."""
 
 __all__ = ["__version__"]
 

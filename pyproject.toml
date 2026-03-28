@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nano-llm-api"
+name = "nano-llm-relay"
 version = "0.1.0"
 description = "Minimal local proxy for OpenAI and Anthropic protocol bridging."
 readme = "README.md"
@@ -19,10 +19,10 @@ dependencies = [
 dev = ["pytest>=8.0,<9.0"]
 
 [project.scripts]
-nano-llm-api = "nano_llm_api.app:main"
+nano-llm-relay = "nano_llm_relay.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
-include = ["nano_llm_api*"]
+include = ["nano_llm_relay*"]

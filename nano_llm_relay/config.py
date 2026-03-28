@@ -16,7 +16,7 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
-    log_file: str = "logs/nano-llm-api.log"
+    log_file: str = "logs/nano-llm-relay.log"
     timeout_seconds: float = 600.0
 
 
@@ -89,7 +89,7 @@ def load_config(path: str | Path) -> AppConfig:
         host=str(server_raw.get("host", "127.0.0.1")),
         port=int(server_raw.get("port", 8000)),
         log_level=str(server_raw.get("log_level", "INFO")).upper(),
-        log_file=str(server_raw.get("log_file", "logs/nano-llm-api.log")),
+        log_file=str(server_raw.get("log_file", "logs/nano-llm-relay.log")),
         timeout_seconds=float(server_raw.get("timeout_seconds", 600.0)),
     )
 
@@ -175,4 +175,3 @@ def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
-

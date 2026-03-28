@@ -27,7 +27,7 @@ def setup_logging(config: ServerConfig) -> logging.Logger:
         file_handler.setFormatter(formatter)
         handlers.append(file_handler)
 
-    for logger_name in ("nano_llm_api", "uvicorn.error", "uvicorn.access"):
+    for logger_name in ("nano_llm_relay", "uvicorn.error", "uvicorn.access"):
         logger = logging.getLogger(logger_name)
         logger.setLevel(level)
         logger.propagate = False
@@ -35,4 +35,4 @@ def setup_logging(config: ServerConfig) -> logging.Logger:
         for handler in handlers:
             logger.addHandler(handler)
 
-    return logging.getLogger("nano_llm_api")
+    return logging.getLogger("nano_llm_relay")

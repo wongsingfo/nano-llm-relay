@@ -9,10 +9,10 @@ import httpx
 import pytest
 import yaml
 
-from nano_llm_api.app import create_app
-from nano_llm_api.config import ConfigStore, ServerConfig, load_config
-from nano_llm_api.logutil import setup_logging
-from nano_llm_api.service import ProxyService
+from nano_llm_relay.app import create_app
+from nano_llm_relay.config import ConfigStore, ServerConfig, load_config
+from nano_llm_relay.logutil import setup_logging
+from nano_llm_relay.service import ProxyService
 
 pytestmark = pytest.mark.anyio
 
@@ -85,6 +85,30 @@ def test_load_config_parses_provider_proxy(tmp_path: Path):
     assert loaded.providers["openai"].proxy == "http://127.0.0.1:7890"
 
 
+def test_load_config_defaults_log_file_name(tmp_path: Path):
+    config = {
+        "providers": {
+            "openai": {
+                "base_url": "https://openai.test",
+                "api_key": "openai-test-key",
+            }
+        },
+        "models": {
+            "gpt-chat": {
+                "provider": "openai",
+                "protocol": "openai_chat",
+                "target_model": "gpt-4o-mini",
+            }
+        },
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    loaded = load_config(path)
+
+    assert loaded.server.log_file == "logs/nano-llm-relay.log"
+
+
 async def test_provider_proxy_client_cache_reload_and_transport_bypass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -137,7 +161,7 @@ async def test_provider_proxy_client_cache_reload_and_transport_bypass(
         async def aclose(self):
             self.closed = True
 
-    monkeypatch.setattr("nano_llm_api.service.httpx.AsyncClient", RecordingAsyncClient)
+    monkeypatch.setattr("nano_llm_relay.service.httpx.AsyncClient", RecordingAsyncClient)
 
     service = ProxyService(ConfigStore(path))
     initial_config = service.config_store.get_config()
@@ -182,6 +206,7 @@ async def test_provider_proxy_client_cache_reload_and_transport_bypass(
 async def test_handle_request_logs_inbound_body_at_debug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_path = make_config(tmp_path)
     debug_calls: list[tuple[str, tuple[object, ...]]] = []
+    long_content = "x" * 120
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -207,15 +232,25 @@ async def test_handle_request_logs_inbound_body_at_debug(tmp_path: Path, monkeyp
 
     body = {
         "model": "claude",
-        "messages": [{"role": "user", "content": "hello"}],
+        "messages": [{"role": "user", "content": long_content}],
+        "metadata": {"note": "hello"},
     }
     response = await service.handle_request("openai_chat", body, {})
+    expected_body = json.dumps(
+        {
+            "model": "claude",
+            "messages": [{"role": "user", "content": f"{'x' * 100} ..."}],
+            "metadata": {"note": "hello"},
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
     assert response.status_code == 200
     assert debug_calls == [
         (
             "proxy_inbound_request inbound=%s body=%s",
-            ("openai_chat", '{"model":"claude","messages":[{"role":"user","content":"hello"}]}'),
+            ("openai_chat", expected_body),
         )
     ]
 
@@ -785,6 +820,27 @@ async def test_unhandled_exception_is_logged_to_file(tmp_path: Path):
     assert "RuntimeError: boom" in log_text
 
 
+async def test_create_app_uses_new_metadata_and_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config_path = make_config(tmp_path)
+    monkeypatch.setenv("NANO_LLM_RELAY_CONFIG", str(config_path))
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("No upstream request expected for root endpoint.")
+
+    app = create_app(transport=httpx.MockTransport(handler))
+    assert app.title == "nano-llm-relay"
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/")
+
+    assert response.status_code == 200
+    assert response.json() == {"name": "nano-llm-relay", "status": "ok"}
+
+
 async def test_list_models(tmp_path: Path):
     config_path = make_config(tmp_path)
 
@@ -802,6 +858,7 @@ async def test_list_models(tmp_path: Path):
     assert response.status_code == 200
     data = response.json()["data"]
     assert {item["id"] for item in data} == {"claude", "gpt-chat", "gpt-responses"}
+    assert {item["owned_by"] for item in data} == {"nano-llm-relay/anthropic", "nano-llm-relay/openai"}
 
 
 async def test_list_provider_models(tmp_path: Path):

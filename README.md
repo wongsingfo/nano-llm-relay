@@ -1,6 +1,6 @@
-# nano-llm-api
+# nano-llm-relay
 
-`nano-llm-api` is a minimal local LLM proxy that bridges the two most common API dialects, OpenAI and Anthropic, with as few dependencies as possible. The goal is to give local tools a single endpoint that can forward requests to different backend models without pulling in the heavier operational surface area of a full gateway.
+`nano-llm-relay` is a minimal local LLM proxy that bridges the two most common API dialects, OpenAI and Anthropic, with as few dependencies as possible. The goal is to give local tools a single endpoint that can forward requests to different backend models without pulling in the heavier operational surface area of a full gateway.
 
 ## Current support
 
@@ -83,13 +83,13 @@ Provider proxy settings apply to both normal JSON requests and SSE streaming req
 ## Running
 
 ```bash
-NANO_LLM_CONFIG=config.yaml .venv/bin/nano-llm-api
+NANO_LLM_RELAY_CONFIG=config.yaml .venv/bin/nano-llm-relay
 ```
 
 Or directly:
 
 ```bash
-NANO_LLM_CONFIG=config.yaml .venv/bin/python -m nano_llm_api
+NANO_LLM_RELAY_CONFIG=config.yaml .venv/bin/python -m nano_llm_relay
 ```
 
 ## Examples
