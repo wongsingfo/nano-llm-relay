@@ -293,6 +293,9 @@ def _normalize_openai_responses_request(body: dict[str, Any]) -> NormalizedReque
             )
             continue
 
+        if item_type == "reasoning":
+            continue
+
         if item_type is None and "role" in item:
             role = _normalize_role(item.get("role"))
             messages.append(
@@ -1701,12 +1704,13 @@ def _messages_to_openai_responses(messages: list[NormalizedMessage]) -> list[dic
         tool_result_blocks = [block for block in message.blocks if block.type == "tool_result"]
 
         if text_blocks and message.role in {"user", "assistant"}:
+            content_type = "output_text" if message.role == "assistant" else "input_text"
             items.append(
                 {
                     "type": "message",
                     "role": message.role,
                     "content": [
-                        {"type": "input_text", "text": block.text or ""}
+                        {"type": content_type, "text": block.text or ""}
                         for block in text_blocks
                     ],
                 }
@@ -1727,13 +1731,7 @@ def _messages_to_openai_responses(messages: list[NormalizedMessage]) -> list[dic
                 {
                     "type": "function_call_output",
                     "call_id": block.tool_call_id or _new_id("call"),
-                    "output": [
-                        {
-                            "type": "input_text",
-                            "text": block.text or "",
-                        }
-                    ],
-                    "is_error": block.is_error,
+                    "output": block.text or "",
                 }
             )
     return items
@@ -2064,6 +2062,8 @@ def _parse_content_blocks(content: Any) -> list[MessageBlock]:
                     is_error=bool(item.get("is_error")),
                 )
             )
+            continue
+        if item_type in {"thinking", "redacted_thinking"}:
             continue
         raise ProtocolError(f"Unsupported content block type `{item_type}`.")
     return blocks

@@ -7,26 +7,25 @@ This project intentionally targets a subset of `./litellm` and may use it as a r
 To stay lightweight and low-memory:
 
 1. Language: Python + FastAPI. Go or Rust may use less memory, but Python is still the fastest way to build on top of the current AI ecosystem, especially for streaming, SDK integration, and prompt-processing logic. FastAPI's async model is enough to keep latency low under concurrency.
-2. SDK choice: official SDKs such as `openai` or `anthropic` are acceptable when they improve development speed. If startup time and memory footprint matter more, prefer direct `httpx` requests.
-3. Configuration: YAML via PyYAML. It is the easiest format to read and edit by hand for provider and model mappings.
-4. No database: file logging is enough.
+2. Package management: `uv` for all Python-related tasks — dependency resolution, virtualenv, running scripts and tools. No pip/pip-tools.
+3. SDK choice: official SDKs such as `openai` or `anthropic` are acceptable when they improve development speed. If startup time and memory footprint matter more, prefer direct `httpx` requests.
+4. Configuration: YAML via PyYAML. It is the easiest format to read and edit by hand for provider and model mappings.
+5. No database: file logging is enough.
 
 ## Commands
 
 ```bash
-# Install with dev dependencies
-pip install -e '.[dev]'
-# or with uv:
+# Install dependencies (uv manages all Python tooling)
 uv sync
 
 # Run the service
-NANO_LLM_RELAY_CONFIG=config.yaml python -m nano_llm_relay
+NANO_LLM_RELAY_CONFIG=config.yaml uv run python -m nano_llm_relay
 
 # Run all tests (no external calls — uses httpx.MockTransport)
-pytest
+uv run pytest
 
 # Run a single test
-pytest tests/test_proxy.py::test_name
+uv run pytest tests/test_proxy.py::test_name
 ```
 
 ## Architecture
