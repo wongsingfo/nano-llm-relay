@@ -1971,15 +1971,15 @@ def _ensure_no_passthrough_responses_tools(
     request: NormalizedRequest,
     target_protocol: ProtocolName,
 ) -> None:
+    """Silently drop non-portable Responses passthrough tools when
+    the target protocol cannot handle them (e.g. ``web_search``
+    targeting Anthropic).  The tools are removed from the request
+    so serialization proceeds without error."""
     raw_tools = _responses_passthrough_tools(request)
     if not raw_tools:
         return
-    raw_types = sorted({str(tool.get("type") or "unknown") for tool in raw_tools})
-    raise ProtocolError(
-        "Responses tools of type "
-        f"{', '.join(f'`{tool_type}`' for tool_type in raw_types)} "
-        f"require an `{OPENAI_RESPONSES}` target, not `{target_protocol}`."
-    )
+    # Clear the stashed passthrough tools so they are not re-injected.
+    request.extra.pop(RESPONSES_PASSTHROUGH_TOOLS_KEY, None)
 
 
 def _normalize_role(value: Any) -> str:
