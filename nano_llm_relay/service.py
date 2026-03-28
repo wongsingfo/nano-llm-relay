@@ -29,7 +29,7 @@ from .protocols import (
     serialize_response,
 )
 
-_DEBUG_LOG_STRING_LIMIT = 100
+_DEBUG_LOG_STRING_LIMIT = 30
 _DEBUG_LOG_STRING_SUFFIX = " ..."
 
 
@@ -379,7 +379,11 @@ class ProxyService:
         if protocol == OPENAI_RESPONSES:
             self._merge_responses_reasoning_defaults(merged_payload, remaining_extra)
 
-        merged_payload.update(remaining_extra)
+        for key, value in remaining_extra.items():
+            if value is None:
+                merged_payload.pop(key, None)
+            else:
+                merged_payload[key] = value
         return merged_payload
 
     def _merge_responses_reasoning_defaults(

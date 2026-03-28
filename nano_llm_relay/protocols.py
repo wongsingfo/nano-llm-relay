@@ -118,13 +118,18 @@ def default_endpoint_path(protocol: ProtocolName) -> str:
 
 
 def join_endpoint(base_url: str, endpoint: str) -> str:
-    base = base_url.rstrip("/")
     if endpoint.startswith("http://") or endpoint.startswith("https://"):
         return endpoint
+    # Split off query params from base_url so path joining works correctly.
+    query = ""
+    if "?" in base_url:
+        base_url, query = base_url.split("?", 1)
+        query = f"?{query}"
+    base = base_url.rstrip("/")
     normalized = endpoint if endpoint.startswith("/") else f"/{endpoint}"
     if base.endswith("/v1") and normalized.startswith("/v1/"):
         normalized = normalized[3:]
-    return f"{base}{normalized}"
+    return f"{base}{normalized}{query}"
 
 
 def _normalize_openai_chat_request(body: dict[str, Any]) -> NormalizedRequest:
