@@ -495,6 +495,12 @@ def _serialize_anthropic_request(target_model: str, request: NormalizedRequest) 
         if request.tool_choice is not None:
             payload["tool_choice"] = _tool_choice_to_anthropic(request.tool_choice)
 
+    if request.extra.get("_anthropic_web_search"):
+        payload.setdefault("tools", []).append({
+            "type": "web_search_20250305",
+            "name": "web_search",
+        })
+
     payload.update(_pick_keys(request.extra, {"service_tier", "thinking"}))
     if request.metadata and request.inbound_protocol == ANTHROPIC_MESSAGES:
         payload["metadata"] = request.metadata
@@ -949,6 +955,8 @@ async def _iter_anthropic_stream(response: httpx.Response) -> AsyncIterator[Stre
                 "Anthropic content block missing `type`.",
             )
             block_types[item_key] = block_type
+            if block_type in {"server_tool_use", "web_search_tool_result"}:
+                continue
             if block_type == "tool_use":
                 yield StreamEvent(
                     type="tool_call_started",
@@ -981,6 +989,8 @@ async def _iter_anthropic_stream(response: httpx.Response) -> AsyncIterator[Stre
         if event_type == "content_block_delta":
             index = payload.get("index", 0)
             item_key = f"block:{index}"
+            if block_types.get(item_key) in {"server_tool_use", "web_search_tool_result"}:
+                continue
             delta = payload.get("delta") or {}
             delta_type = delta.get("type")
             if delta_type == "text_delta":
@@ -1007,6 +1017,8 @@ async def _iter_anthropic_stream(response: httpx.Response) -> AsyncIterator[Stre
         if event_type == "content_block_stop":
             index = payload.get("index", 0)
             item_key = f"block:{index}"
+            if block_types.get(item_key) in {"server_tool_use", "web_search_tool_result"}:
+                continue
             if block_types.get(item_key) == "tool_use":
                 yield StreamEvent(
                     type="tool_call_finished",
@@ -1977,12 +1989,18 @@ def _ensure_no_passthrough_responses_tools(
     target_protocol: ProtocolName,
 ) -> None:
     """Silently drop non-portable Responses passthrough tools when
-    the target protocol cannot handle them (e.g. ``web_search``
-    targeting Anthropic).  The tools are removed from the request
-    so serialization proceeds without error."""
+    the target protocol cannot handle them.  When the target is
+    Anthropic and a ``web_search`` tool is present, flag the request
+    so ``_serialize_anthropic_request`` injects the Anthropic server
+    tool equivalent."""
     raw_tools = _responses_passthrough_tools(request)
     if not raw_tools:
         return
+    if target_protocol == ANTHROPIC_MESSAGES:
+        for tool in raw_tools:
+            if tool.get("type") == "web_search":
+                request.extra["_anthropic_web_search"] = True
+                break
     # Clear the stashed passthrough tools so they are not re-injected.
     request.extra.pop(RESPONSES_PASSTHROUGH_TOOLS_KEY, None)
 
@@ -2069,6 +2087,8 @@ def _parse_content_blocks(content: Any) -> list[MessageBlock]:
             )
             continue
         if item_type in {"thinking", "redacted_thinking"}:
+            continue
+        if item_type in {"server_tool_use", "web_search_tool_result"}:
             continue
         raise ProtocolError(f"Unsupported content block type `{item_type}`.")
     return blocks

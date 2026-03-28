@@ -1071,3 +1071,135 @@ async def test_list_provider_models_uses_custom_auth_header(tmp_path: Path):
             "error": None,
         }
     ]
+
+
+async def test_openai_responses_web_search_to_anthropic_non_stream(tmp_path: Path):
+    """web_search passthrough tool is converted to Anthropic server tool;
+    server_tool_use and web_search_tool_result blocks in the response are
+    skipped — only text comes through."""
+    config_path = make_config(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://anthropic.test/v1/messages"
+        payload = json.loads(request.content.decode("utf-8"))
+        # web_search should be injected as Anthropic server tool
+        assert any(
+            t.get("type") == "web_search_20250305" and t.get("name") == "web_search"
+            for t in payload.get("tools", [])
+        ), f"Expected web_search_20250305 tool in {payload.get('tools')}"
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_ws_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-3-7-sonnet-latest",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_1",
+                        "name": "web_search",
+                        "input": {"query": "Higgs boson mass GeV"},
+                    },
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_1",
+                        "content": "<encrypted>opaque</encrypted>",
+                    },
+                    {
+                        "type": "text",
+                        "text": "The Higgs boson mass is about 125.25 GeV.",
+                    },
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 20, "output_tokens": 15},
+            },
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "claude",
+                    "input": "What is the mass of the Higgs boson?",
+                    "tools": [{"type": "web_search"}],
+                },
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "response"
+    # Only text output, no function_call items from server_tool_use
+    assert len(body["output"]) == 1
+    assert body["output"][0]["type"] == "message"
+    assert "125.25 GeV" in body["output"][0]["content"][0]["text"]
+
+
+async def test_openai_responses_web_search_to_anthropic_stream(tmp_path: Path):
+    """Streaming: server_tool_use and web_search_tool_result blocks are
+    silently skipped; only text deltas reach the Responses stream encoder."""
+    config_path = make_config(tmp_path)
+
+    # Simulate Anthropic SSE with server tool blocks then text
+    sse_payload = (
+        'data: {"type":"message_start","message":{"id":"msg_ws_s1","type":"message","role":"assistant",'
+        '"model":"claude-3-7-sonnet-latest","content":[],"stop_reason":null,"stop_sequence":null,'
+        '"usage":{"input_tokens":20,"output_tokens":0}}}\n\n'
+        # server_tool_use block
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_s1","name":"web_search","input":{}}}\n\n'
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"Higgs boson\\"}"}}\n\n'
+        'data: {"type":"content_block_stop","index":0}\n\n'
+        # web_search_tool_result block
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_s1","content":"<encrypted>"}}\n\n'
+        'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n'
+        'data: {"type":"content_block_stop","index":1}\n\n'
+        # text block with the answer
+        'data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}\n\n'
+        'data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"125 GeV"}}\n\n'
+        'data: {"type":"content_block_stop","index":2}\n\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}\n\n'
+        'data: {"type":"message_stop"}\n\n'
+    ).encode("utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://anthropic.test/v1/messages"
+        payload = json.loads(request.content.decode("utf-8"))
+        assert any(
+            t.get("type") == "web_search_20250305"
+            for t in payload.get("tools", [])
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse_payload,
+        )
+
+    app = create_app(config_path=str(config_path), transport=httpx.MockTransport(handler))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "claude",
+                    "input": "What is the mass of the Higgs boson?",
+                    "tools": [{"type": "web_search"}],
+                    "stream": True,
+                },
+            )
+
+    assert response.status_code == 200
+    body_text = response.content.decode("utf-8")
+    # Should contain text delta with "125 GeV"
+    assert "125 GeV" in body_text
+    # Should NOT contain any function_call items (server_tool_use was skipped)
+    assert "function_call" not in body_text
+    # Should have response.completed
+    assert "response.completed" in body_text
