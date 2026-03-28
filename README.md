@@ -11,6 +11,7 @@ This project is still under active development. APIs, configuration, and protoco
 - Inbound protocols:
   - `POST /v1/chat/completions`
   - `POST /v1/responses`
+  - `WS /v1/responses` (WebSocket, for Codex and other Responses API clients)
   - `POST /v1/messages`
 - Outbound protocols:
   - `openai_chat`
@@ -25,6 +26,7 @@ This project is still under active development. APIs, configuration, and protoco
   - Text request and response translation
   - Function/tool call translation
   - SSE streaming passthrough with event-shape conversion
+  - WebSocket streaming for the Responses API (with per-connection session history)
   - YAML config hot reload
   - File-based logging
 
@@ -32,7 +34,7 @@ This project is still under active development. APIs, configuration, and protoco
 
 - Databases, auth backends, load balancing, or admin UI
 - Full compatibility for multimodal blocks, MCP, or custom tool types
-- Server-side conversation state management; `previous_response_id` is only forwarded as-is to `openai_responses` backends
+- Server-side conversation state management; `previous_response_id` is forwarded as-is over HTTP to `openai_responses` backends but stripped in WebSocket mode where the relay manages session history locally
 
 ## Installation
 
