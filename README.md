@@ -33,9 +33,10 @@
 ## Installation
 
 ```bash
-python -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+uv sync
 ```
+
+`uv` creates and manages the project virtual environment from `uv.lock`. For a runtime-only environment, use `uv sync --no-dev`.
 
 ## Configuration
 
@@ -83,13 +84,13 @@ Provider proxy settings apply to both normal JSON requests and SSE streaming req
 ## Running
 
 ```bash
-NANO_LLM_RELAY_CONFIG=config.yaml .venv/bin/nano-llm-relay
+NANO_LLM_RELAY_CONFIG=config.yaml uv run nano-llm-relay
 ```
 
 Or directly:
 
 ```bash
-NANO_LLM_RELAY_CONFIG=config.yaml .venv/bin/python -m nano_llm_relay
+NANO_LLM_RELAY_CONFIG=config.yaml uv run python -m nano_llm_relay
 ```
 
 ## Examples
@@ -127,7 +128,7 @@ curl http://127.0.0.1:8080/v1/provider-models
 ## Testing
 
 ```bash
-.venv/bin/pytest
+uv run pytest
 ```
 
-The test suite uses `httpx.MockTransport`, so it does not make external network calls.
+The test suite uses `httpx.MockTransport`, so it does not make external network calls. If you change dependencies, refresh the lockfile with `uv lock`.
