@@ -2,6 +2,10 @@
 
 `nano-llm-relay` is a minimal local LLM proxy that bridges the two most common API dialects, OpenAI and Anthropic, with as few dependencies as possible. The goal is to give local tools a single endpoint that can forward requests to different backend models without pulling in the heavier operational surface area of a full gateway.
 
+## Status
+
+This project is still under active development. APIs, configuration, and protocol support may change, and some behavior is not yet finalized.
+
 ## Current support
 
 - Inbound protocols:
