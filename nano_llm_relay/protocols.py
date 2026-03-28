@@ -118,10 +118,17 @@ def default_endpoint_path(protocol: ProtocolName) -> str:
 
 
 def join_endpoint(base_url: str, endpoint: str) -> str:
-    base = base_url.rstrip("/")
     if endpoint.startswith("http://") or endpoint.startswith("https://"):
         return endpoint
     normalized = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    # Split query string from base so the path is appended before it.
+    if "?" in base_url:
+        base_path, query = base_url.split("?", 1)
+        base_path = base_path.rstrip("/")
+        if base_path.endswith("/v1") and normalized.startswith("/v1/"):
+            normalized = normalized[3:]
+        return f"{base_path}{normalized}?{query}"
+    base = base_url.rstrip("/")
     if base.endswith("/v1") and normalized.startswith("/v1/"):
         normalized = normalized[3:]
     return f"{base}{normalized}"
@@ -986,16 +993,14 @@ async def _iter_anthropic_stream(response: httpx.Response) -> AsyncIterator[Stre
                     text=_require_string(delta.get("text"), "Anthropic text delta missing `text`."),
                 )
             elif delta_type == "input_json_delta":
+                partial = delta.get("partial_json") or ""
                 yield StreamEvent(
                     type="tool_call_delta",
                     response_id=response_id,
                     model=model,
                     created=created,
                     item_key=item_key,
-                    arguments=_require_string(
-                        delta.get("partial_json"),
-                        "Anthropic input_json_delta missing `partial_json`.",
-                    ),
+                    arguments=partial,
                 )
             continue
 
