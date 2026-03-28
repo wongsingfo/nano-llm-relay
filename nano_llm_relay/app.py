@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from .config import ConfigStore
@@ -69,6 +70,28 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         return await _proxy_request(request, OPENAI_CHAT)
+
+    @app.websocket("/v1/responses")
+    async def responses_ws(ws: WebSocket):
+        await ws.accept()
+        service: ProxyService = ws.app.state.proxy_service
+        session_history: list[dict] = []
+        try:
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    await ws.send_json({"type": "error", "error": {"message": "Invalid JSON."}})
+                    continue
+                if not isinstance(msg, dict) or msg.get("type") != "response.create":
+                    await ws.send_json({"type": "error", "error": {"message": "Expected type=response.create."}})
+                    continue
+                await service.handle_websocket_request(ws, msg, session_history)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            logger.exception("websocket_error")
 
     @app.post("/v1/responses")
     async def responses(request: Request):

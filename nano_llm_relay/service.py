@@ -12,6 +12,8 @@ from uuid import uuid4
 import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from fastapi import WebSocket
+
 from .config import ConfigStore, ProviderConfig
 from .models import MessageBlock, NormalizedResponse, ProtocolName, StreamEvent, UsageStats
 from .protocols import (
@@ -28,6 +30,7 @@ from .protocols import (
     serialize_request,
     serialize_response,
 )
+from .sse import iter_sse_json_lines
 
 _DEBUG_LOG_STRING_LIMIT = 100
 _DEBUG_LOG_STRING_SUFFIX = " ..."
@@ -187,6 +190,180 @@ class ProxyService:
             normalized_request=normalized,
             started_at=started_at,
         )
+
+    async def handle_websocket_request(
+        self,
+        ws: WebSocket,
+        body: dict[str, Any],
+        session_history: list[dict[str, Any]],
+    ) -> None:
+        """Handle a single response.create message over WebSocket.
+
+        Proxies through to upstream via HTTP, then forwards SSE events
+        as individual WebSocket JSON text frames.
+
+        ``session_history`` is a mutable list of input items accumulated
+        across turns on the same WS connection.  This method appends the
+        current turn's input items and the assistant's output items so
+        that subsequent turns carry the full conversation context (the
+        upstream provider does not store responses).
+        """
+        started_at = time.perf_counter()
+        inbound_protocol = OPENAI_RESPONSES
+
+        # The body from response.create is the same shape as an HTTP POST body
+        # (model, input, tools, stream, etc.) — strip WS-specific fields.
+        body.pop("type", None)
+        generate = body.pop("generate", True)
+        body.pop("previous_response_id", None)
+        body.setdefault("stream", True)
+
+        # Warm-up request: generate=false means "cache prompt, don't generate".
+        # Return synthetic response events without hitting upstream.
+        if not generate:
+            resp_id = f"resp_{uuid4().hex}"
+            model = body.get("model", "unknown")
+            created = int(time.time())
+            self.logger.info("ws_warmup model=%s", model)
+            stub_response = {
+                "id": resp_id,
+                "object": "response",
+                "created_at": created,
+                "status": "completed",
+                "model": model,
+                "output": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            }
+            await ws.send_json({"type": "response.created", "response": stub_response})
+            await ws.send_json({"type": "response.completed", "response": stub_response})
+            return
+
+        # Prepend session history so the upstream sees the full conversation.
+        current_input = body.get("input") or []
+        if isinstance(current_input, str):
+            current_input = [{"type": "message", "role": "user", "content": current_input}]
+        body["input"] = session_history + current_input
+
+        # Save passthrough fields before normalization strips them.
+        original_body = dict(body)
+
+        self._log_inbound_request(inbound_protocol, body)
+        try:
+            normalized = normalize_request(inbound_protocol, body)
+        except ProtocolError as exc:
+            await ws.send_json({"type": "error", "error": {"message": str(exc)}})
+            return
+
+        config = self.config_store.get_config()
+        route = config.models.get(normalized.model)
+        if route is None:
+            await ws.send_json({"type": "error", "error": {"message": f"Unknown model alias `{normalized.model}`."}})
+            return
+
+        provider = config.providers[route.provider]
+        client = await self._get_provider_client(provider)
+        try:
+            payload = serialize_request(route.protocol, route.target_model, normalized)
+        except ProtocolError as exc:
+            await ws.send_json({"type": "error", "error": {"message": str(exc)}})
+            return
+        payload = self._merge_route_extra_body(route.protocol, payload, route.extra_body)
+
+        # Force streaming for WebSocket
+        payload["stream"] = True
+
+        # Re-inject passthrough fields from the original body that the
+        # normalize→serialize cycle doesn't handle (e.g. prompt_cache_key,
+        # client_metadata, include).
+        if inbound_protocol == route.protocol:
+            for key, value in original_body.items():
+                if key not in payload:
+                    payload[key] = value
+
+        url = join_endpoint(provider.base_url, route.endpoint or default_endpoint_path(route.protocol))
+        headers = self._build_outbound_headers(
+            provider=provider,
+            protocol=route.protocol,
+            inbound_headers={},
+            stream=True,
+        )
+        timeout = route.timeout_seconds or provider.timeout_seconds or config.server.timeout_seconds
+
+        self.logger.info(
+            "ws_proxy_request outbound=%s model=%s target_model=%s",
+            route.protocol,
+            normalized.model,
+            route.target_model,
+        )
+
+        request_context = client.stream("POST", url, headers=headers, json=payload, timeout=timeout)
+        try:
+            upstream_response = await request_context.__aenter__()
+        except httpx.HTTPError as exc:
+            await ws.send_json({"type": "error", "error": {"message": f"Upstream request failed: {exc}"}})
+            return
+
+        completed_response: dict[str, Any] | None = None
+        try:
+            if upstream_response.status_code >= 400:
+                details = await self._safe_error_body(upstream_response)
+                self.logger.warning(
+                    "ws_upstream_error status=%s details=%s",
+                    upstream_response.status_code,
+                    details,
+                )
+                await ws.send_json({"type": "error", "error": {"message": "Upstream provider error.", "details": details}})
+                return
+
+            if inbound_protocol == route.protocol:
+                # Passthrough: strip SSE framing, forward raw JSON as WS frames.
+                # Also capture the response.completed event for session history.
+                async for json_line in iter_sse_json_lines(upstream_response):
+                    await ws.send_text(json_line)
+                    if completed_response is None:
+                        try:
+                            evt = json.loads(json_line)
+                            if isinstance(evt, dict) and evt.get("type") == "response.completed":
+                                completed_response = evt.get("response", {})
+                        except json.JSONDecodeError:
+                            pass
+            else:
+                encoder = build_stream_encoder(inbound_protocol)
+                async for event in iter_normalized_stream(route.protocol, upstream_response):
+                    for chunk in encoder.encode(event):
+                        text = chunk.decode("utf-8", errors="replace")
+                        for line in text.splitlines():
+                            if line.startswith("data:"):
+                                data = line[5:].lstrip()
+                                if data and data != "[DONE]":
+                                    await ws.send_text(data)
+                                    if completed_response is None:
+                                        try:
+                                            evt = json.loads(data)
+                                            if isinstance(evt, dict) and evt.get("type") == "response.completed":
+                                                completed_response = evt.get("response", {})
+                                        except json.JSONDecodeError:
+                                            pass
+        except Exception as exc:
+            self.logger.exception("ws_proxy_stream_error")
+            try:
+                await ws.send_json({"type": "error", "error": {"message": str(exc)}})
+            except Exception:
+                pass
+        finally:
+            await request_context.__aexit__(None, None, None)
+            self.logger.info(
+                "ws_proxy_complete model=%s duration_ms=%.2f",
+                normalized.model,
+                (time.perf_counter() - started_at) * 1000,
+            )
+
+        # Update session history with the current turn's input and the
+        # assistant's output so the next turn has full context.
+        if completed_response:
+            session_history.extend(current_input)
+            for output_item in completed_response.get("output", []):
+                session_history.append(output_item)
 
     async def _handle_json(
         self,
