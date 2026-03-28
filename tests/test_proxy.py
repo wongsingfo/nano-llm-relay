@@ -439,7 +439,7 @@ async def test_openai_responses_inbound_accepts_developer_role(tmp_path: Path):
         assert str(request.url) == "https://openai.test/v1/chat/completions"
         payload = json.loads(request.content.decode("utf-8"))
         assert payload["messages"] == [
-            {"role": "system", "content": "Follow the repository instructions."},
+            {"role": "developer", "content": "Follow the repository instructions."},
             {"role": "user", "content": "Summarize the bug."},
         ]
         return httpx.Response(

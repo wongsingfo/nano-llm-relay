@@ -220,7 +220,7 @@ def _normalize_openai_responses_request(body: dict[str, Any]) -> NormalizedReque
     instructions = body.get("instructions")
     if instructions is not None:
         messages.append(
-            NormalizedMessage(role="system", blocks=_parse_content_blocks(instructions))
+            NormalizedMessage(role="developer", blocks=_parse_content_blocks(instructions))
         )
 
     raw_input = body.get("input")
@@ -1643,8 +1643,8 @@ def _messages_to_openai_chat(messages: list[NormalizedMessage]) -> list[dict[str
         tool_use_blocks = [block for block in message.blocks if block.type == "tool_use"]
         tool_result_blocks = [block for block in message.blocks if block.type == "tool_result"]
 
-        if message.role == "system":
-            payload.append({"role": "system", "content": _join_text_blocks(text_blocks)})
+        if message.role in {"system", "developer"}:
+            payload.append({"role": message.role, "content": _join_text_blocks(text_blocks)})
             continue
 
         if message.role == "assistant":
@@ -1692,7 +1692,7 @@ def _messages_to_openai_chat(messages: list[NormalizedMessage]) -> list[dict[str
 def _messages_to_openai_responses(messages: list[NormalizedMessage]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for message in messages:
-        if message.role == "system":
+        if message.role in {"system", "developer"}:
             continue
 
         text_blocks = [block for block in message.blocks if block.type == "text"]
@@ -1741,7 +1741,7 @@ def _messages_to_openai_responses(messages: list[NormalizedMessage]) -> list[dic
 def _messages_to_anthropic(messages: list[NormalizedMessage]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for message in messages:
-        if message.role == "system":
+        if message.role in {"system", "developer"}:
             continue
 
         assistant_content = [
@@ -1985,9 +1985,7 @@ def _ensure_no_passthrough_responses_tools(
 
 def _normalize_role(value: Any) -> str:
     role = _require_string(value, "Message is missing `role`.")
-    if role == "developer":
-        return "system"
-    if role not in {"system", "user", "assistant", "tool", "function"}:
+    if role not in {"system", "developer", "user", "assistant", "tool", "function"}:
         raise ProtocolError(f"Unsupported role `{role}`.")
     return role
 
@@ -2071,7 +2069,11 @@ def _parse_content_blocks(content: Any) -> list[MessageBlock]:
 
 
 def _collect_system_text(messages: list[NormalizedMessage]) -> str:
-    parts = [_join_text_blocks(message.blocks) for message in messages if message.role == "system"]
+    parts = [
+        _join_text_blocks(message.blocks)
+        for message in messages
+        if message.role in {"system", "developer"}
+    ]
     return "\n\n".join(part for part in parts if part)
 
 

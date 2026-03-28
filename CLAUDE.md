@@ -50,6 +50,6 @@ HTTP Request
 
 - **Protocol normalization is the core invariant.** All message content reduces to typed `MessageBlock` objects. Never add shortcuts that bypass normalization.
 - **Responses API passthrough tools**: Non-portable tool types (e.g. web search) are stashed in `NormalizedRequest.extra[RESPONSES_PASSTHROUGH_TOOLS_KEY]` and re-injected only when the target is the Responses protocol.
-- **"developer" role** is normalized to "system" on ingestion.
+- **"developer" role** is preserved as a first-class role through normalization. It is only collapsed to "system" at serialization time for protocols that don't support it (Anthropic). For OpenAI Chat and Responses targets, "developer" is emitted as-is.
 - **`extra_body`** in model route config is merged into the serialized upstream request body — used for provider-specific params.
 - **Tests use `MockTransport`** — pass it via `ProxyService(mock_transport=...)` to intercept all upstream calls without network access.

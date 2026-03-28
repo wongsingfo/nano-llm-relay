@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ProtocolName = Literal["openai_chat", "openai_responses", "anthropic_messages"]
-MessageRole = Literal["system", "user", "assistant", "tool"]
+MessageRole = Literal["system", "developer", "user", "assistant", "tool"]
 BlockType = Literal["text", "tool_use", "tool_result"]
 StreamEventType = Literal[
     "response_started",
